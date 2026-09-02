@@ -1,6 +1,8 @@
-# Klippain
+# Klippain-E3NG
 
 > Klippain - The pain-free recipe for (french)bread and butter Klipper configuration!
+
+> Adapted to E3NG, removing unnecessary hardware configurations and adding e3ng specific needs.
 
 Klippain is a generic, modular, and highly customizable Klipper configuration for 3D printers. Designed for use on various machines such as Cartesian, CoreXY and CoreXZ, it has been reported working correctly on Voron V2.4, Voron Trident, Voron V0, Voron SwitchWire, TriZero, VZbot, Ender5, Ender3, Prusas, etc...
 
