@@ -2,10 +2,11 @@
 #################################################
 ###### AUTOMATED INSTALL AND UPDATE SCRIPT ######
 #################################################
-# Written by yomgui1 & Frix_x
-# @version: 1.3
+# Written by yomgui1 & Frix_x, adapted by anunknownsource
+# @version: 1.5
 
 # CHANGELOG:
+#   v1.5: - add options : to choose a custom git branch during install, to reinstall MCU templates 
 #   v1.4: added Shake&Tune install call
 #   v1.3: - added a warning on first install to be sure the user wants to install klippain and fixed a bug
 #           where some artefacts of the old user config where still present after the install (harmless bug but not clean)
@@ -26,8 +27,11 @@ FRIX_CONFIG_PATH="${HOME}/klippain_config"
 BACKUP_PATH="${HOME}/klippain_config_backups"
 # Where the Klipper folder is located (ie. the internal Klipper firmware machinery)
 KLIPPER_PATH="${HOME}/klipper"
-# Branch from Frix-x/klippain repo to use during install (default: main)
-FRIX_BRANCH="main"
+# Git URL of the Frix-x/klippain repo to use during install (default: official repo)
+FRIX_CONFIG_GIT_URL="https://github.com/anunknownsource/klippain-e3ng.git"
+
+# for update purpose
+NEW_INSTALL=false
 
 
 set -eu
@@ -48,20 +52,13 @@ function preflight_checks {
         exit -1
     fi
 
-    local install_klippain_answer
     if [ ! -f "${USER_CONFIG_PATH}/.VERSION" ]; then
         echo "[PRE-CHECK] New installation of Klippain detected!"
         echo "[PRE-CHECK] This install script will WIPE AND REPLACE your current Klipper config with the full Klippain system (a backup will be kept)"
         echo "[PRE-CHECK] Be sure that the printer is idle before continuing!"
         
-        read < /dev/tty -rp "[PRE-CHECK] Are you sure want to proceed and install Klippain? (y/N) " install_klippain_answer
-        if [[ -z "$install_klippain_answer" ]]; then
-            install_klippain_answer="n"
-        fi
-        install_klippain_answer="${install_klippain_answer,,}"
-
-        if [[ "$install_klippain_answer" =~ ^(yes|y)$ ]]; then
-            printf "[PRE-CHECK] Installation confirmed! Continuing...\n\n"
+        if prompt "[PRE-CHECK] Are you sure want to proceed and install Klippain? (y/N) " n ; then
+            echo -e "[PRE-CHECK] Installation confirmed! Continuing...\n"
         else
             echo "[PRE-CHECK] Installation was canceled!"
             exit -1
@@ -72,29 +69,72 @@ function preflight_checks {
 
 # Step 2: Check if the git config folder exist (or download it)
 function check_download {
-    local frixtemppath frixreponame
+    local frixtemppath frixreponame frixbranchname frixrepourl currentbranch nextbranch
     frixtemppath="$(dirname ${FRIX_CONFIG_PATH})"
     frixreponame="$(basename ${FRIX_CONFIG_PATH})"
-    frixbranchname="${FRIX_BRANCH}"
+    frixbranchname="${FRIX_BRANCH:-main}"
+    frixrepourl="${FRIX_CONFIG_GIT_URL}"
+
 
     if [ ! -d "${FRIX_CONFIG_PATH}" ]; then
+        NEW_INSTALL=true
         echo "[DOWNLOAD] Downloading Klippain repository..."
-        if git -C $frixtemppath clone -b $frixbranchname https://github.com/Frix-x/klippain.git $frixreponame; then
+        if git -C $frixtemppath clone -b $frixbranchname  $frixrepourl $frixreponame; then
             printf "[DOWNLOAD] Download complete!\n\n"
         else
             echo "[ERROR] Download of Klippain git repository failed!"
             exit -1
         fi
     else
-        printf "[DOWNLOAD] Klippain repository already found locally. Continuing...\n\n"
+        # retrieve current branch
+        currentbranch=$(git -C ${FRIX_CONFIG_PATH} rev-parse --abbrev-ref HEAD)
+        # check if the user asked for a branch change
+        nextbranch="${FRIX_BRANCH:-$currentbranch}"
+
+        echo -e "[DOWNLOAD] Klippain repository already found locally.\n" \
+            "  Repo : $frixrepourl branch : $currentbranch\nContinuing...\n"
+        
+        # if the branch requested is different than the current one, ask the user if he wants to switch
+        if [[ "${nextbranch}" != "${currentbranch}" ]]; then
+            if prompt "[UPDATE] Current branch is '$currentbranch', do you want to switch to branch '$nextbranch'? (Y/n) " y; then
+                echo "[UPDATE] Switching branch..."
+                git -C ${FRIX_CONFIG_PATH} switch $nextbranch
+                echo "[UPDATE] Change branch '$currentbranch' -> '$nextbranch' done!"
+                currentbranch=$nextbranch
+            else
+                echo -e "[UPDATE] Branch switch canceled by user. Continuing with current branch '$currentbranch'...\n"
+                nextbranch=$currentbranch
+            fi
+        fi
+
+        # update: required if script run in ssh instead of moonraker
+        if [[ "${currentbranch}" == "${nextbranch}" ]]; then
+            echo "[UPDATE] Checking for updates to Klippain repository..."
+
+            git -C ${FRIX_CONFIG_PATH} fetch origin $nextbranch
+            LOCAL=$(git -C ${FRIX_CONFIG_PATH} rev-parse @)
+            REMOTE=$(git -C ${FRIX_CONFIG_PATH} rev-parse @{u})
+
+            if [ $LOCAL = $REMOTE ]; then
+                echo -e "[UPDATE] Klippain repository is already up to date!\n"
+            else
+                echo "[UPDATE] Updates found! Downloading latest changes..."
+                if git -C ${FRIX_CONFIG_PATH} pull --ff-only origin $nextbranch; then
+                    echo -e "[UPDATE] Klippain repository updated successfully!\n"
+                else
+                    echo "[ERROR] Failed to update Klippain repository! Please resolve any conflicts manually."
+                    exit -1
+                fi
+            fi
+        else
+            echo -e "[UPDATE] Skipping update check. Continuing...\n"
+        fi
     fi
 }
 
 
 # Step 3: Backup the old Klipper configuration
 function backup_config {
-    local link link_target
-
     if [ ! -e "${USER_CONFIG_PATH}" ]; then
         printf "[BACKUP] No previous config found, skipping backup...\n\n"
         return 0
@@ -104,15 +144,8 @@ function backup_config {
 
     # Copy every files from the user config ("2>/dev/null || :" allow it to fail silentely in case the config dir doesn't exist)
     cp -fa ${USER_CONFIG_PATH}/. ${BACKUP_DIR} 2>/dev/null || :
-    # Then delete Klippain-managed symlinks while preserving external config symlinks like mainsail.cfg
-    while IFS= read -r -d '' link; do
-        link_target="$(readlink -f "${link}" 2>/dev/null || true)"
-        case "${link_target}" in
-            "${FRIX_CONFIG_PATH}"|"${FRIX_CONFIG_PATH}"/*)
-                rm -f "${link}"
-                ;;
-        esac
-    done < <(find "${BACKUP_DIR}" -type l -print0)
+    # Then delete the symlinks inside the backup folder as they are not needed here...
+    find ${BACKUP_DIR} -type l -exec rm -f {} \;
 
     # If Klippain is not already installed (we check for .VERSION in the backup to detect it),
     # we need to remove, wipe and clean the current user config folder...
@@ -130,7 +163,7 @@ function install_config {
     mkdir -p ${USER_CONFIG_PATH}
 
     # Symlink Frix-x config folders (read-only git repository) to the user's config directory
-    for dir in config macros scripts moonraker; do
+    for dir in config macros scripts moonraker addons; do
         ln -fsn ${FRIX_CONFIG_PATH}/$dir ${USER_CONFIG_PATH}/$dir
     done
 
@@ -140,188 +173,159 @@ function install_config {
     if [ ! -f "${BACKUP_DIR}/.VERSION" ]; then
         printf "[INSTALL] New installation detected: config templates will be set in place!\n\n"
         find ${FRIX_CONFIG_PATH}/user_templates/ -type d -name 'mcu_defaults' -prune -o -type f -print | xargs cp -ft ${USER_CONFIG_PATH}/
-        for config_file in crowsnest.conf sonar.conf timelapse.cfg; do
-            if [ -f "${BACKUP_DIR}/${config_file}" ]; then
-                cp -f "${BACKUP_DIR}/${config_file}" "${USER_CONFIG_PATH}/${config_file}"
-                printf "[INSTALL] Existing ${config_file} restored from backup\n\n"
-            fi
-        done
         install_mcu_templates
+    # Reinstall templates if the user asked for it
+    elif $REINSTALL_TEMPLATES; then
+        echo "[INSTALL] Reinstalling config templates as requested by user!"
+        echo -e "[INSTALL] ${RED}WARNING: this will OVERWRITE your current mcu.cfg file!${DEFAULT}"
+        prompt "[INSTALL] Are you sure you want to reinstall the config templates? (y/N)" n &&
+        cat /dev/null > ${USER_CONFIG_PATH}/mcu.cfg &&
+        install_mcu_templates
+    else
+        printf "[INSTALL] Existing installation detected: skipping config templates installation!\n\n"
     fi
 
     # CHMOD the scripts to be sure they are all executables (Git should keep the modes on files but it's to be sure)
-    chmod +x ${FRIX_CONFIG_PATH}/install.sh
-    chmod +x ${FRIX_CONFIG_PATH}/uninstall.sh
-
-    # Symlink the gcode_shell_command.py file in the correct Klipper folder (erased to always get the last version)
-    ln -fsn ${FRIX_CONFIG_PATH}/scripts/gcode_shell_command.py ${KLIPPER_PATH}/klippy/extras
+    chmod +x ${FRIX_CONFIG_PATH}/*.sh
+    chmod +x ${FRIX_CONFIG_PATH}/scripts/*.py
+    
+    # Symlink the gcode_shell_command.py file in the correct Klipper folder (erased to always get the last version) not Kalico
+    if [ ! -f "${KLIPPER_PATH}/klippy/extras/gcode_shell_command.py" ] || [ -L "${KLIPPER_PATH}/klippy/extras/gcode_shell_command.py" ]; then
+        ln -fsn ${FRIX_CONFIG_PATH}/scripts/gcode_shell_command.py ${KLIPPER_PATH}/klippy/extras
+    else
+        echo "[INSTALL] gcode_shell_command.py plugin already installed, skipping..."
+    fi
+    
 
     # Create or update the config version tracking file in the user config directory
     git -C ${FRIX_CONFIG_PATH} rev-parse HEAD > ${USER_CONFIG_PATH}/.VERSION
 }
 
-
-# Helper function to convert a template filename to a friendlier display name
-function format_template_display_name {
-    local display_name
-    display_name="${1%.cfg}"
-    display_name="${display_name//_/ }"
-    display_name="${display_name//-/ }"
-    display_name="$(printf '%s\n' "${display_name}" | tr -s ' ' | sed -E 's/(^| )V([0-9])/\1v\2/g')"
-
-    if [[ "${display_name}" == "MY OWN CUSTOM TEMPLATE" ]]; then
-        display_name="My Own Custom Template"
-    fi
-
-    printf '%s\n' "${display_name}"
-}
-
-# Helper function to build sorted "display name <tab> file path" entries for a template directory
-function build_template_menu_entries {
-    local template_dir="$1"
-    local file display_name
-
-    while IFS= read -r -d '' file; do
-        display_name="$(format_template_display_name "$(basename "${file}")")"
-        printf '%s\t%s\n' "${display_name}" "${file}"
-    done < <(find "${template_dir}" -maxdepth 1 -type f -name '*.cfg' -print0) | sort -f
-}
-
 # Helper function to ask and install the MCU templates if needed
 function install_mcu_templates {
-    local install_template file_list display_list main_template install_toolhead_template toolhead_template install_mmu_template install_expander_template expander_template
-    local display_name selected_file selected_name
-
-    read < /dev/tty -rp "[CONFIG] Would you like to select and install MCU wiring templates files? (Y/n) " install_template
-    if [[ -z "$install_template" ]]; then
-        install_template="y"
-    fi
-    install_template="${install_template,,}"
+    local  file_list main_template  toolhead_template
 
     # Check and exit if the user do not wants to install an MCU template file
-    if [[ "$install_template" =~ ^(no|n)$ ]]; then
+    if ! prompt "[CONFIG] Would you like to select and install MCU wiring templates files? (Y/n) " y; then
         printf "[CONFIG] Skipping installation of MCU templates. You will need to manually populate your own mcu.cfg file!\n\n"
         return
     fi
 
     # If "yes" was selected, let's continue the install by listing the main MCU template
     file_list=()
-    display_list=()
-    while IFS=$'\t' read -r display_name selected_file; do
-        file_list+=("${selected_file}")
-        display_list+=("${display_name}")
-    done < <(build_template_menu_entries "${FRIX_CONFIG_PATH}/user_templates/mcu_defaults/main")
+    while IFS= read -r -d '' file; do
+        file_list+=("$file")
+    done < <(find "${FRIX_CONFIG_PATH}/user_templates/mcu_defaults/main" -maxdepth 1 -type f -print0)
+    file_list=($(printf '%s\n' "${file_list[@]}" | sort))
     echo "[CONFIG] Please select your main MCU in the following list:"
     for i in "${!file_list[@]}"; do
-        echo "  $((i+1))) ${display_list[i]}"
+        echo "  $((i+1))) $(basename "${file_list[i]}")"
     done
 
     read < /dev/tty -p "[CONFIG] Template to install (or 0 to skip): " main_template
     if [[ "$main_template" -gt 0 ]]; then
         # If the user selected a file, copy its content into the mcu.cfg file
-        selected_file="${file_list[$((main_template-1))]}"
-        selected_name="${display_list[$((main_template-1))]}"
-        cat "${selected_file}" >> ${USER_CONFIG_PATH}/mcu.cfg
-        printf "[CONFIG] Template '%s' inserted into your mcu.cfg user file\n\n" "${selected_name}"
+        filename=$(basename "${file_list[$((main_template-1))]}")
+        cat "${FRIX_CONFIG_PATH}/user_templates/mcu_defaults/main/$filename" >> ${USER_CONFIG_PATH}/mcu.cfg
+        printf "[CONFIG] Template '$filename' inserted into your mcu.cfg user file\n\n"
     else
         printf "[CONFIG] No template selected. Skip and continuing...\n\n"
     fi
 
     # Next see if the user use a toolhead board
-    read < /dev/tty -rp "[CONFIG] Do you have a toolhead MCU and want to install a template? (y/N) " install_toolhead_template
-    if [[ -z "$install_toolhead_template" ]]; then
-        install_toolhead_template="n"
-    fi
-    install_toolhead_template="${install_toolhead_template,,}"
-
     # Check if the user wants to install a toolhead MCU template
-    if [[ "$install_toolhead_template" =~ ^(yes|y)$ ]]; then
+    if prompt "[CONFIG] Do you have a toolhead MCU and want to install a template? (y/N) " n; then
         file_list=()
-        display_list=()
-        while IFS=$'\t' read -r display_name selected_file; do
-            file_list+=("${selected_file}")
-            display_list+=("${display_name}")
-        done < <(build_template_menu_entries "${FRIX_CONFIG_PATH}/user_templates/mcu_defaults/toolhead")
+        while IFS= read -r -d '' file; do
+            file_list+=("$file")
+        done < <(find "${FRIX_CONFIG_PATH}/user_templates/mcu_defaults/toolhead" -maxdepth 1 -type f -print0)
+        file_list=($(printf '%s\n' "${file_list[@]}" | sort))
         echo "[CONFIG] Please select your toolhead MCU in the following list:"
         for i in "${!file_list[@]}"; do
-            echo "  $((i+1))) ${display_list[i]}"
+            echo "  $((i+1))) $(basename "${file_list[i]}")"
         done
 
         read < /dev/tty -p "[CONFIG] Template to install (or 0 to skip): " toolhead_template
         if [[ "$toolhead_template" -gt 0 ]]; then
             # If the user selected a file, copy its content into the mcu.cfg file
-            selected_file="${file_list[$((toolhead_template-1))]}"
-            selected_name="${display_list[$((toolhead_template-1))]}"
-            cat "${selected_file}" >> ${USER_CONFIG_PATH}/mcu.cfg
-            printf "[CONFIG] Template '%s' inserted into your mcu.cfg user file\n\n" "${selected_name}"
+            filename=$(basename "${file_list[$((toolhead_template-1))]}")
+            cat "${FRIX_CONFIG_PATH}/user_templates/mcu_defaults/toolhead/$filename" >> ${USER_CONFIG_PATH}/mcu.cfg
+            printf "[CONFIG] Template '$filename' inserted into your mcu.cfg user file\n\n"
         else
             printf "[CONFIG] No toolhead template selected. Skip and continuing...\n\n"
         fi
     fi
 
     # Next see if the user use an MMU/ERCF board
-    read < /dev/tty -rp "[CONFIG] Do you have an MMU/ERCF MCU and want to install a template? (y/N) " install_mmu_template
-    if [[ -z "$install_mmu_template" ]]; then
-        install_mmu_template="n"
-    fi
-    install_mmu_template="${install_mmu_template,,}"
-
     # Check if the user wants to install an MMU/ERCF MCU template
-    if [[ "$install_mmu_template" =~ ^(yes|y)$ ]]; then
+    if prompt "[CONFIG] Do you have an MMU/ERCF MCU and want to install a template? (y/N) " n; then
         file_list=()
-        display_list=()
-        while IFS=$'\t' read -r display_name selected_file; do
-            file_list+=("${selected_file}")
-            display_list+=("${display_name}")
-        done < <(build_template_menu_entries "${FRIX_CONFIG_PATH}/user_templates/mcu_defaults/mmu")
+        while IFS= read -r -d '' file; do
+            file_list+=("$file")
+        done < <(find "${FRIX_CONFIG_PATH}/user_templates/mcu_defaults/mmu" -maxdepth 1 -type f -print0)
+        file_list=($(printf '%s\n' "${file_list[@]}" | sort))
         echo "[CONFIG] Please select your MMU/ERCF MCU in the following list:"
         for i in "${!file_list[@]}"; do
-            echo "  $((i+1))) ${display_list[i]}"
+            echo "  $((i+1))) $(basename "${file_list[i]}")"
         done
 
         read < /dev/tty -p "[CONFIG] Template to install (or 0 to skip): " mmu_template
         if [[ "$mmu_template" -gt 0 ]]; then
             # If the user selected a file, copy its content into the mcu.cfg file
-            selected_file="${file_list[$((mmu_template-1))]}"
-            selected_name="${display_list[$((mmu_template-1))]}"
-            cat "${selected_file}" >> ${USER_CONFIG_PATH}/mcu.cfg
-            printf "[CONFIG] Template '%s' inserted into your mcu.cfg user file\n" "${selected_name}"
+            filename=$(basename "${file_list[$((mmu_template-1))]}")
+            cat "${FRIX_CONFIG_PATH}/user_templates/mcu_defaults/mmu/$filename" >> ${USER_CONFIG_PATH}/mcu.cfg
+            echo "[CONFIG] Template '$filename' inserted into your mcu.cfg user file"
             printf "[CONFIG] Note: keep in mind that you have to install the HappyHare backend manually to use an MMU/ERCF with Klippain. See the Klippain documentation for more information!\n\n"
         else
             printf "[CONFIG] No MMU/ERCF template selected. Skip and continuing...\n\n"
         fi
     fi
 
-    # Finally see if the user use an expander board
-    read < /dev/tty -rp "[CONFIG] Do you have an expander board and want to install a template? (y/N) " install_expander_template
-    if [[ -z "$install_expander_template" ]]; then
-        install_expander_template="n"
-    fi
-    install_expander_template="${install_expander_template,,}"
-
+   # Finally see if the user use an expander board
     # Check if the user wants to install an expander MCU template
-    if [[ "$install_expander_template" =~ ^(yes|y)$ ]]; then
+    if prompt "[CONFIG] Do you have an expander board and want to install a template? (y/N) " n; then
         file_list=()
-        display_list=()
-        while IFS=$'\t' read -r display_name selected_file; do
-            file_list+=("${selected_file}")
-            display_list+=("${display_name}")
-        done < <(build_template_menu_entries "${FRIX_CONFIG_PATH}/user_templates/mcu_defaults/expander")
+        while IFS= read -r -d '' file; do
+            file_list+=("$file")
+        done < <(find "${FRIX_CONFIG_PATH}/user_templates/mcu_defaults/expand" -maxdepth 1 -type f -print0)
+        file_list=($(printf '%s\n' "${file_list[@]}" | sort))
         echo "[CONFIG] Please select your expander MCU in the following list:"
         for i in "${!file_list[@]}"; do
-            echo "  $((i+1))) ${display_list[i]}"
+            echo "  $((i+1))) $(basename "${file_list[i]}")"
         done
 
         read < /dev/tty -p "[CONFIG] Template to install (or 0 to skip): " expander_template
         if [[ "$expander_template" -gt 0 ]]; then
             # If the user selected a file, copy its content into the mcu.cfg file
-            selected_file="${file_list[$((expander_template-1))]}"
-            selected_name="${display_list[$((expander_template-1))]}"
-            cat "${selected_file}" >> ${USER_CONFIG_PATH}/mcu.cfg
-            printf "[CONFIG] Template '%s' inserted into your mcu.cfg user file\n\n" "${selected_name}"
+            filename=$(basename "${file_list[$((expander_template-1))]}")
+            cat "${FRIX_CONFIG_PATH}/user_templates/mcu_defaults/expand/$filename" >> ${USER_CONFIG_PATH}/mcu.cfg
+            printf "[CONFIG] Template '$filename' inserted into your mcu.cfg user file\n\n"
         else
             printf "[CONFIG] No expander template selected. Skip and continuing...\n\n"
         fi
+    fi
+}
+
+# Installation of addons if any
+function install_addons {
+    if $NEW_INSTALL || $REINSTALL_ADDONS; then
+        echo "[ADDONS-INSTALL] New installation detected, installing addons..."
+        if prompt "[ADDONS-INSTALL] Do you want to install/update klippain-shaketune addon now? (Y/n) " y; then
+            wget -O - https://raw.githubusercontent.com/Frix-x/klippain-shaketune/main/install.sh | bash
+            # Shake&Tune installation code goes here
+        else
+            echo "[ADDONS-INSTALL] Skipping klippain-shaketune addon installation as per user request."
+        fi
+
+        # Future addons installation can be added here
+
+    else
+        if [ -d "${HOME}/klippain_shaketune" ]; then
+            echo "[ADDONS-INSTALL] klippain-shaketune addon detected, updating..."
+            wget -O - https://raw.githubusercontent.com/Frix-x/klippain-shaketune/main/install.sh | bash
+        fi
+
+
     fi
 }
 
@@ -331,7 +335,49 @@ function restart_klipper {
     sudo systemctl restart klipper
 }
 
+## utility functions and main script body below ##
 
+# Colors helpers
+RED=$'\033[1;31m'
+MAGENTA=$'\033[0;35m'
+DEFAULT=$'\033[0m'
+
+prompt() {
+  local default="Yn"
+  [ $# -eq 2 ] && [ ${2^} = "N" ] && default="yN"
+ 
+  while true; do
+    read -p "${MAGENTA}$1${DEFAULT}" yn
+    case $yn in
+    [Yy]*) return 0 ;;
+    "")
+      [ $default = "yN" ] && return 1 # Return 1 if N, 0 if Y is default
+      return 0 # Return 0 on Enter key press (Y as default)
+      ;; 
+    [Nn]*) return 1 ;;
+    esac
+    line_count=$(echo $1 | wc -l)
+    for ((i=0; i<$line_count; i++)); do
+      echo -ne '\e[1A\e[K' # Move cursor up and clear line
+    done
+  done
+}
+
+parse_args() {
+  while [[ "$#" -gt 0 ]]; do
+    case $1 in
+      -b|--branch) FRIX_BRANCH="$2"; shift ;;
+      --reinstall-templates) REINSTALL_TEMPLATES=true ;;
+      --reinstall-addons) REINSTALL_ADDONS=true ;;
+      --) shift; break ;;
+      -?*) echo "Unknown option: $1" ;;
+    esac
+    shift
+  done
+}
+REINSTALL_TEMPLATES=false
+REINSTALL_ADDONS=false
+NEW_INSTALL=false
 BACKUP_DIR="${BACKUP_PATH}/$(date +'%Y_%m_%d-%H%M%S')"
 
 printf "\n======================================\n"
@@ -339,13 +385,13 @@ echo "- Klippain install and update script -"
 printf "======================================\n\n"
 
 # Run steps
+parse_args "$@"
 preflight_checks
 check_download
 backup_config
 install_config
+install_addons
 restart_klipper
 
-wget -O - https://raw.githubusercontent.com/Frix-x/klippain-shaketune/main/install.sh | bash
-
-echo "[POST-INSTALL] Everything is ok, Klippain installed and up to date!"
-echo "[POST-INSTALL] Be sure to check the breaking changes on the release page: https://github.com/Frix-x/klippain/releases"
+echo "[POST-INSTALL] Everything is ok, Klippain-E3NG installed and up to date!"
+echo "[POST-INSTALL] Be sure to check the breaking changes on the release page: https://github.com/anunknownsource/klippain-e3ng/releases"
