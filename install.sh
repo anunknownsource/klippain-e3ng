@@ -28,8 +28,8 @@ BACKUP_PATH="${HOME}/klippain_config_backups"
 # Where the Klipper folder is located (ie. the internal Klipper firmware machinery)
 KLIPPER_PATH="${HOME}/klipper"
 # Git URL of the Frix-x/klippain repo to use during install (default: official repo)
-FRIX_CONFIG_GIT_URL="https://github.com/anunknownsource/klippain-e3ng.git"
-
+FRIX_CONFIG_GIT_URL="https://github.com/anunknownsource/klippain-e3ng/tree/e3ng.git"
+https://github.com/anunknownsource/klippain-e3ng/tree/e3ng
 # for update purpose
 NEW_INSTALL=false
 
