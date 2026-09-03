@@ -2,10 +2,12 @@
 #################################################
 ###### AUTOMATED INSTALL AND UPDATE SCRIPT ######
 #################################################
-# Written by yomgui1 & Frix_x, adapted by anunknownsource
-# @version: 1.5
+# Written by yomgui1 & Frix_x.
+# Adapted to E3NG by anunknownsource from klippain-chocolate by elpopo-eng
+# @version: 1.6
 
 # CHANGELOG:
+#   v1.6: - adapted to E3NG 
 #   v1.5: - add options : to choose a custom git branch during install, to reinstall MCU templates 
 #   v1.4: added Shake&Tune install call
 #   v1.3: - added a warning on first install to be sure the user wants to install klippain and fixed a bug
@@ -28,8 +30,8 @@ BACKUP_PATH="${HOME}/klippain_config_backups"
 # Where the Klipper folder is located (ie. the internal Klipper firmware machinery)
 KLIPPER_PATH="${HOME}/klipper"
 # Git URL of the Frix-x/klippain repo to use during install (default: official repo)
-FRIX_CONFIG_GIT_URL="https://github.com/anunknownsource/klippain-e3ng/tree/e3ng.git"
-https://github.com/anunknownsource/klippain-e3ng/tree/e3ng
+FRIX_CONFIG_GIT_URL="https://github.com/anunknownsource/klippain-e3ng.git"
+
 # for update purpose
 NEW_INSTALL=false
 
@@ -53,11 +55,11 @@ function preflight_checks {
     fi
 
     if [ ! -f "${USER_CONFIG_PATH}/.VERSION" ]; then
-        echo "[PRE-CHECK] New installation of Klippain detected!"
-        echo "[PRE-CHECK] This install script will WIPE AND REPLACE your current Klipper config with the full Klippain system (a backup will be kept)"
+        echo "[PRE-CHECK] New installation of Klippain-E3NG detected!"
+        echo "[PRE-CHECK] This install script will WIPE AND REPLACE your current Klipper config with the full Klippain-E3NG system (a backup will be kept)"
         echo "[PRE-CHECK] Be sure that the printer is idle before continuing!"
         
-        if prompt "[PRE-CHECK] Are you sure want to proceed and install Klippain? (y/N) " n ; then
+        if prompt "[PRE-CHECK] Are you sure want to proceed and install Klippain-E3NG? (y/N) " n ; then
             echo -e "[PRE-CHECK] Installation confirmed! Continuing...\n"
         else
             echo "[PRE-CHECK] Installation was canceled!"
@@ -78,11 +80,11 @@ function check_download {
 
     if [ ! -d "${FRIX_CONFIG_PATH}" ]; then
         NEW_INSTALL=true
-        echo "[DOWNLOAD] Downloading Klippain repository..."
+        echo "[DOWNLOAD] Downloading Klippain-E3NG repository..."
         if git -C $frixtemppath clone -b $frixbranchname  $frixrepourl $frixreponame; then
             printf "[DOWNLOAD] Download complete!\n\n"
         else
-            echo "[ERROR] Download of Klippain git repository failed!"
+            echo "[ERROR] Download of Klippain-E3NG git repository failed!"
             exit -1
         fi
     else
@@ -109,20 +111,20 @@ function check_download {
 
         # update: required if script run in ssh instead of moonraker
         if [[ "${currentbranch}" == "${nextbranch}" ]]; then
-            echo "[UPDATE] Checking for updates to Klippain repository..."
+            echo "[UPDATE] Checking for updates to Klippain-E3NG repository..."
 
             git -C ${FRIX_CONFIG_PATH} fetch origin $nextbranch
             LOCAL=$(git -C ${FRIX_CONFIG_PATH} rev-parse @)
             REMOTE=$(git -C ${FRIX_CONFIG_PATH} rev-parse @{u})
 
             if [ $LOCAL = $REMOTE ]; then
-                echo -e "[UPDATE] Klippain repository is already up to date!\n"
+                echo -e "[UPDATE] Klippain-E3NG repository is already up to date!\n"
             else
                 echo "[UPDATE] Updates found! Downloading latest changes..."
                 if git -C ${FRIX_CONFIG_PATH} pull --ff-only origin $nextbranch; then
                     echo -e "[UPDATE] Klippain repository updated successfully!\n"
                 else
-                    echo "[ERROR] Failed to update Klippain repository! Please resolve any conflicts manually."
+                    echo "[ERROR] Failed to update Klippain-E3NG repository! Please resolve any conflicts manually."
                     exit -1
                 fi
             fi
@@ -159,7 +161,7 @@ function backup_config {
 
 # Step 4: Put the new configuration files in place to be ready to start
 function install_config {
-    echo "[INSTALL] Installation of the last Klippain config files"
+    echo "[INSTALL] Installation of the last Klippain-E3NG config files"
     mkdir -p ${USER_CONFIG_PATH}
 
     # Symlink Frix-x config folders (read-only git repository) to the user's config directory
@@ -275,7 +277,7 @@ function install_mcu_templates {
             filename=$(basename "${file_list[$((mmu_template-1))]}")
             cat "${FRIX_CONFIG_PATH}/user_templates/mcu_defaults/mmu/$filename" >> ${USER_CONFIG_PATH}/mcu.cfg
             echo "[CONFIG] Template '$filename' inserted into your mcu.cfg user file"
-            printf "[CONFIG] Note: keep in mind that you have to install the HappyHare backend manually to use an MMU/ERCF with Klippain. See the Klippain documentation for more information!\n\n"
+            printf "[CONFIG] Note: keep in mind that you have to install the HappyHare backend manually to use an MMU/ERCF with Klippain. See the Klippain-E3NG documentation for more information!\n\n"
         else
             printf "[CONFIG] No MMU/ERCF template selected. Skip and continuing...\n\n"
         fi
