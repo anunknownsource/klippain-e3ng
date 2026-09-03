@@ -1,0 +1,72 @@
+#----------------------------------------------#
+#### Modded Creality 4.2.2/4.2.7 definition ####
+#----------------------------------------------#
+
+[mcu]
+##--------------------------------------------------------------------
+serial: /dev/serial/by-id/change-me-to-the-correct-mcu-path
+##--------------------------------------------------------------------
+
+[include config/mcu_definitions/main/Creality422_427.cfg] # Do not remove this line
+[board_pins Creality_mcu]
+mcu: mcu
+aliases:
+    X_STEP=MCU_XM_STEP , X_DIR=MCU_XM_DIR , X_ENABLE=MCU_XM_ENABLE ,
+    Y_STEP=MCU_YM_STEP , Y_DIR=MCU_YM_DIR , Y_ENABLE=MCU_YM_ENABLE ,
+    Z_STEP=MCU_ZM_STEP , Z_DIR=MCU_ZM_DIR , Z_ENABLE=MCU_ZM_ENABLE ,
+    E_STEP=MCU_EM_STEP , E_DIR=MCU_EM_DIR , E_ENABLE=MCU_EM_ENABLE ,
+
+    X_STOP=MCU_XSTOP , Y_STOP=MCU_YSTOP , Z_STOP=MCU_ZSTOP ,
+    RUNOUT_SENSOR=MCU_E0STOP ,
+    PROBE_INPUT=MCU_PROBE    ,
+    SERVO_PIN=MCU_SERVOS     ,
+
+    E_HEATER=MCU_HE0   , E_TEMPERATURE=MCU_TH0   ,
+    BED_HEATER=MCU_BED , BED_TEMPERATURE=MCU_THB ,
+
+    PART_FAN=MCU_FAN0 , 
+
+[stepper_x]
+step_pin: X_STEP
+dir_pin: X_DIR
+enable_pin: !X_ENABLE
+endstop_pin: ^X_STOP
+
+[tmc2208 stepper_x]
+uart_pin: TMCUART
+tx_pin: TMCTX
+uart_address: 0
+
+[stepper_y]
+step_pin: Y_STEP
+dir_pin: Y_DIR
+enable_pin: !Y_ENABLE
+endstop_pin: ^Y_STOP
+
+[tmc2209 stepper_y]
+uart_pin: TMCUART
+tx_pin: TMCTX
+uart_address: 2
+
+[stepper_z]
+step_pin: Z_STEP
+dir_pin: !Z_DIR
+enable_pin: !Z_ENABLE
+endstop_pin: ^Z_STOP
+
+[tmc2209 stepper_z]
+uart_pin: TMCUART
+tx_pin: TMCTX
+uart_address: 1
+
+# Comment this section if you are using a toolhead with its own MCU
+[extruder]
+step_pin: secondary:Z_STEP
+dir_pin: secondary:Z_DIR
+enable_pin: !secondary:Z_ENABLE
+endstop_pin: secondary:Z_STOP
+
+[tmc2209 extruder]
+uart_pin: TMCUART
+tx_pin: TMCTX
+uart_address: 3
