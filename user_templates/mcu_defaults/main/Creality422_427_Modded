@@ -11,10 +11,10 @@ serial: /dev/serial/by-id/change-me-to-the-correct-mcu-path
 [board_pins Creality_mcu]
 mcu: mcu
 aliases:
-    X_STEP=MCU_XM_STEP , X_DIR=MCU_XM_DIR , X_ENABLE=MCU_XM_ENABLE ,
-    Y_STEP=MCU_YM_STEP , Y_DIR=MCU_YM_DIR , Y_ENABLE=MCU_YM_ENABLE ,
-    Z_STEP=MCU_ZM_STEP , Z_DIR=MCU_ZM_DIR , Z_ENABLE=MCU_ZM_ENABLE ,
-    E_STEP=MCU_EM_STEP , E_DIR=MCU_EM_DIR , E_ENABLE=MCU_EM_ENABLE ,
+    X_STEP=MCU_XM_STEP , X_DIR=MCU_XM_DIR , X_ENABLE=MCU_XM_ENABLE , X_TMCUART=MCU_XM_CS ,
+    Y_STEP=MCU_YM_STEP , Y_DIR=MCU_YM_DIR , Y_ENABLE=MCU_YM_ENABLE , Y_TMCUART=MCU_XM_CS ,
+    Z_STEP=MCU_ZM_STEP , Z_DIR=MCU_ZM_DIR , Z_ENABLE=MCU_ZM_ENABLE , Z_TMCUART=MCU_XM_CS ,
+    E_STEP=MCU_EM_STEP , E_DIR=MCU_EM_DIR , E_ENABLE=MCU_EM_ENABLE , E_TMCUART=MCU_XM_CS ,
 
     X_STOP=MCU_XSTOP , Y_STOP=MCU_YSTOP , Z_STOP=MCU_ZSTOP ,
     RUNOUT_SENSOR=MCU_E0STOP ,
@@ -33,9 +33,7 @@ enable_pin: !X_ENABLE
 endstop_pin: ^X_STOP
 
 [tmc2208 stepper_x]
-uart_pin: TMCUART
-tx_pin: TMCTX
-uart_address: 0
+uart_pin: X_TMCUART
 
 [stepper_y]
 step_pin: Y_STEP
@@ -44,9 +42,7 @@ enable_pin: !Y_ENABLE
 endstop_pin: ^Y_STOP
 
 [tmc2209 stepper_y]
-uart_pin: TMCUART
-tx_pin: TMCTX
-uart_address: 2
+uart_pin: Y_TMCUART
 
 [stepper_z]
 step_pin: Z_STEP
@@ -55,9 +51,7 @@ enable_pin: !Z_ENABLE
 endstop_pin: ^Z_STOP
 
 [tmc2209 stepper_z]
-uart_pin: TMCUART
-tx_pin: TMCTX
-uart_address: 1
+uart_pin: Z_TMCUART
 
 # Comment this section if you are using a toolhead with its own MCU
 [extruder]
@@ -67,6 +61,4 @@ enable_pin: !secondary:Z_ENABLE
 endstop_pin: secondary:Z_STOP
 
 [tmc2209 extruder]
-uart_pin: TMCUART
-tx_pin: TMCTX
-uart_address: 3
+uart_pin: E_TMCUART
