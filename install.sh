@@ -3,9 +3,10 @@
 ###### AUTOMATED INSTALL AND UPDATE SCRIPT ######
 #################################################
 # Written by yomgui1 & Frix_x
-# @version: 1.3
+# @version: 1.5
 
 # CHANGELOG:
+#   v1.5: Added standalone configuration migration
 #   v1.4: added Shake&Tune install call
 #   v1.3: - added a warning on first install to be sure the user wants to install klippain and fixed a bug
 #           where some artefacts of the old user config where still present after the install (harmless bug but not clean)
@@ -100,64 +101,123 @@ function backup_config {
         return 0
     fi
 
-    mkdir -p ${BACKUP_DIR}
+    mkdir -p "${BACKUP_DIR}"
 
-    # Copy every files from the user config ("2>/dev/null || :" allow it to fail silentely in case the config dir doesn't exist)
-    cp -fa ${USER_CONFIG_PATH}/. ${BACKUP_DIR} 2>/dev/null || :
-    # Then delete Klippain-managed symlinks while preserving external config symlinks like mainsail.cfg
+    cp -fa \
+        "${USER_CONFIG_PATH}/." \
+        "${BACKUP_DIR}" \
+        2>/dev/null || :
+
+    # Delete only Klippain-managed symlinks from the backup.
+    # Preserve external config symlinks such as mainsail.cfg.
     while IFS= read -r -d '' link; do
-        link_target="$(readlink -f "${link}" 2>/dev/null || true)"
+
+        link_target="$(
+            readlink -f "${link}" 2>/dev/null || true
+        )"
+
         case "${link_target}" in
+
             "${FRIX_CONFIG_PATH}"|"${FRIX_CONFIG_PATH}"/*)
                 rm -f "${link}"
                 ;;
-        esac
-    done < <(find "${BACKUP_DIR}" -type l -print0)
 
-    # If Klippain is not already installed (we check for .VERSION in the backup to detect it),
-    # we need to remove, wipe and clean the current user config folder...
+        esac
+
+    done < <(
+        find "${BACKUP_DIR}" -type l -print0
+    )
+
+    # If Klippain wasn't already installed, clean the user's
+    # configuration directory before performing a new installation.
     if [ ! -f "${BACKUP_DIR}/.VERSION" ]; then
-        rm -fR ${USER_CONFIG_PATH}
+        rm -fR "${USER_CONFIG_PATH}"
     fi
 
-    printf "[BACKUP] Backup of current user config files done in: ${BACKUP_DIR}\n\n"
+    printf \
+        "[BACKUP] Backup of current user config files done in: %s\n\n" \
+        "${BACKUP_DIR}"
 }
-
 
 # Step 4: Put the new configuration files in place to be ready to start
 function install_config {
-    echo "[INSTALL] Installation of the last Klippain config files"
-    mkdir -p ${USER_CONFIG_PATH}
+    local migration_script
 
-    # Symlink Frix-x config folders (read-only git repository) to the user's config directory
+    echo "[INSTALL] Installation of the latest Klippain config files"
+    mkdir -p "${USER_CONFIG_PATH}"
+
+    # Symlink Klippain config folders (read-only git repository)
+    # to the user's config directory.
     for dir in config macros scripts moonraker; do
-        ln -fsn ${FRIX_CONFIG_PATH}/$dir ${USER_CONFIG_PATH}/$dir
+        ln -fsn \
+            "${FRIX_CONFIG_PATH}/${dir}" \
+            "${USER_CONFIG_PATH}/${dir}"
     done
 
-    # Detect if it's a first install by looking at the .VERSION file to ask for the config
-    # template install. If the config is already installed, nothing need to be done here
-    # as moonraker is already pulling the changes and custom user config files are already here
+    # ============================================================
+    # NEW INSTALLATION
+    # ============================================================
+
     if [ ! -f "${BACKUP_DIR}/.VERSION" ]; then
         printf "[INSTALL] New installation detected: config templates will be set in place!\n\n"
-        find ${FRIX_CONFIG_PATH}/user_templates/ -type d -name 'mcu_defaults' -prune -o -type f -print | xargs cp -ft ${USER_CONFIG_PATH}/
-        for config_file in crowsnest.conf sonar.conf timelapse.cfg; do
+        find "${FRIX_CONFIG_PATH}/user_templates/" \
+            -type d -name 'mcu_defaults' -prune \
+            -o -type f -print |
+            xargs cp -ft "${USER_CONFIG_PATH}/"
+
+        # Restore external service configuration files if they
+        # existed before Klippain was installed.
+        #
+        # This behavior exists in the current upstream installer.
+        for config_file in \
+            crowsnest.conf \
+            sonar.conf \
+            timelapse.cfg
+        do
             if [ -f "${BACKUP_DIR}/${config_file}" ]; then
-                cp -f "${BACKUP_DIR}/${config_file}" "${USER_CONFIG_PATH}/${config_file}"
-                printf "[INSTALL] Existing ${config_file} restored from backup\n\n"
+                cp -f \
+                    "${BACKUP_DIR}/${config_file}" \
+                    "${USER_CONFIG_PATH}/${config_file}"
+                printf \
+                    "[INSTALL] Existing %s restored from backup\n\n" \
+                    "${config_file}"
             fi
         done
         install_mcu_templates
+
+    # ============================================================
+    # EXISTING INSTALLATION
+    # ============================================================
+    else
+        printf "[INSTALL] Existing Klippain installation detected.\n"
+        printf "[INSTALL] Updating user configuration templates...\n\n"
+
+        migration_script="${FRIX_CONFIG_PATH}/scripts/config_migration.sh"
+
+        if [[ ! -f "${migration_script}" ]]; then
+            echo "[ERROR] Configuration migration script not found:"
+            echo "[ERROR] ${migration_script}"
+            return 1
+        fi
+
+        # shellcheck source=/dev/null
+        source "${migration_script}"
+
+        update_user_templates
     fi
 
-    # CHMOD the scripts to be sure they are all executables (Git should keep the modes on files but it's to be sure)
-    chmod +x ${FRIX_CONFIG_PATH}/install.sh
-    chmod +x ${FRIX_CONFIG_PATH}/uninstall.sh
+    # CHMOD scripts.
+    chmod +x "${FRIX_CONFIG_PATH}/install.sh"
+    chmod +x "${FRIX_CONFIG_PATH}/uninstall.sh"
 
-    # Symlink the gcode_shell_command.py file in the correct Klipper folder (erased to always get the last version)
-    ln -fsn ${FRIX_CONFIG_PATH}/scripts/gcode_shell_command.py ${KLIPPER_PATH}/klippy/extras
+    # Symlink gcode_shell_command.py.
+    ln -fsn \
+        "${FRIX_CONFIG_PATH}/scripts/gcode_shell_command.py" \
+        "${KLIPPER_PATH}/klippy/extras"
 
-    # Create or update the config version tracking file in the user config directory
-    git -C ${FRIX_CONFIG_PATH} rev-parse HEAD > ${USER_CONFIG_PATH}/.VERSION
+    # Record the repository version associated with this config.
+    git -C "${FRIX_CONFIG_PATH}" rev-parse HEAD \
+        > "${USER_CONFIG_PATH}/.VERSION"
 }
 
 
@@ -331,6 +391,45 @@ function restart_klipper {
     sudo systemctl restart klipper
 }
 
+
+# ================================================================
+# COMMAND-LINE MODES
+# ================================================================
+
+if [[ "${1:-}" == "--test-migration" ]]; then
+    migration_test_script=""
+
+    # Prefer the migration module beside this installer when running
+    # from a checked-out repository. Fall back to the configured
+    # Klippain repository path.
+    script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd || true)"
+
+    if [[ -n "${script_dir}" && -f "${script_dir}/scripts/config_migration.sh" ]]; then
+        migration_test_script="${script_dir}/scripts/config_migration.sh"
+    elif [[ -f "${FRIX_CONFIG_PATH}/scripts/config_migration.sh" ]]; then
+        migration_test_script="${FRIX_CONFIG_PATH}/scripts/config_migration.sh"
+    fi
+
+    if [[ -z "${migration_test_script}" ]]; then
+        echo "[ERROR] Unable to locate scripts/config_migration.sh."
+        echo "[ERROR] Run this command from a checked-out Klippain repository"
+        echo "[ERROR] or ensure ${FRIX_CONFIG_PATH} contains the migration module."
+        exit 1
+    fi
+
+    exec bash "${migration_test_script}" --test-migration
+fi
+
+if [[ $# -gt 0 ]]; then
+    echo "[ERROR] Unknown option: $1"
+    echo "Usage: $0 [--test-migration]"
+    exit 1
+fi
+
+
+# ================================================================
+# NORMAL INSTALLATION
+# ================================================================
 
 BACKUP_DIR="${BACKUP_PATH}/$(date +'%Y_%m_%d-%H%M%S')"
 
