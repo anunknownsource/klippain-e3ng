@@ -349,7 +349,8 @@ prompt() {
   [ $# -eq 2 ] && [ ${2^} = "N" ] && default="yN"
  
   while true; do
-    read -p "${MAGENTA}$1${DEFAULT}" yn
+    #read -p "${MAGENTA}$1${DEFAULT}" yn
+    read < /dev/tty -r -p "${MAGENTA}$1${DEFAULT}" yn
     case $yn in
     [Yy]*) return 0 ;;
     "")
