@@ -432,12 +432,10 @@ function migrate_printer_config {
             if (anchor != "") {
 
                 line_number = new_line_number[anchor]
-
                 insert_count[line_number]++
 
-                insert_after[
-                    line_number SUBSEP insert_count[line_number]
-                ] = old_original[key]
+                idx = line_number SUBSEP insert_count[line_number]
+                insert_after[idx] = old_original[key]
 
             } else {
 
@@ -459,12 +457,10 @@ function migrate_printer_config {
                 if (next_anchor != "") {
 
                     line_number = new_line_number[next_anchor]
-
                     insert_before_count[line_number]++
 
-                    insert_before[
-                        line_number SUBSEP insert_before_count[line_number]
-                    ] = old_original[key]
+                    idx = line_number SUBSEP insert_before_count[line_number]
+                    insert_before[idx] = old_original[key]
 
                 } else {
 
@@ -498,14 +494,10 @@ function migrate_printer_config {
             # Custom includes that belong before this line.
             if (i in insert_before_count) {
 
-                for (
-                    j = 1;
-                    j <= insert_before_count[i];
-                    j++
-                ) {
-                    print insert_before[
-                        i SUBSEP j
-                    ]
+                for (j = 1; j <= insert_before_count[i]; j++) {
+
+                    idx = i SUBSEP j
+                    print insert_before[idx]
                 }
             }
 
@@ -546,16 +538,12 @@ function migrate_printer_config {
 
 
             # Custom includes anchored after this line.
-            if (i in insert_count) {
+           if (i in insert_count) {
 
-                for (
-                    j = 1;
-                    j <= insert_count[i];
-                    j++
-                ) {
-                    print insert_after[
-                        i SUBSEP j
-                    ]
+                for (j = 1; j <= insert_count[i]; j++) {
+
+                    idx = i SUBSEP j
+                    print insert_after[idx]
                 }
             }
         }
