@@ -140,59 +140,91 @@ function backup_config {
 
 # ================================================================
 # USER CONFIG MIGRATION
+# ================================================================
 #
 # During an update:
-#   - printer.cfg is rebuilt from the newest template while
-#     preserving the user's enabled includes and custom includes.
 #
-#   - variables.cfg is rebuilt from the newest template while
-#     preserving the user's existing variable values.
+# printer.cfg
+#   - Start with the newest Klippain template.
+#   - Preserve enabled/disabled state of existing includes.
+#   - Preserve custom user includes.
+#   - Keep new upstream comments and organization.
 #
-# Existing values are NEVER automatically changed to new defaults.
+# variables.cfg
+#   - Start with the newest Klippain template.
+#   - Preserve all existing user values.
+#   - Add newly introduced upstream variables.
+#   - Annotate changed defaults.
+#   - Preserve customized variables removed upstream as #deprecated.
+#   - Remove obsolete upstream variables that were never customized.
+#   - Preserve user-created variables.
+#
 # ================================================================
 
 function update_user_templates {
     local old_printer="${BACKUP_DIR}/printer.cfg"
     local old_variables="${BACKUP_DIR}/variables.cfg"
-    local old_variables_template=""
-    
+
     local new_printer="${FRIX_CONFIG_PATH}/user_templates/printer.cfg"
     local new_variables="${FRIX_CONFIG_PATH}/user_templates/variables.cfg"
 
     local live_printer="${USER_CONFIG_PATH}/printer.cfg"
     local live_variables="${USER_CONFIG_PATH}/variables.cfg"
 
+    local old_variables_template=""
     local previous_version=""
 
     echo "[CONFIG-UPDATE] Migrating user configuration..."
 
+
+    # ============================================================
+    # printer.cfg
+    # ============================================================
+
     if [[ -f "$old_printer" && -f "$new_printer" ]]; then
+
         migrate_printer_config \
             "$old_printer" \
             "$new_printer" \
             "$live_printer"
+
     else
+
         echo "[CONFIG-UPDATE] WARNING: Unable to migrate printer.cfg."
         echo "[CONFIG-UPDATE] Old config or new template is missing."
+
     fi
 
-    # ------------------------------------------------------------
-    # Retrieve the variables.cfg template from the version that was
-    # installed before this update.
+
+    # ============================================================
+    # Locate the variables.cfg template from the version that was
+    # previously installed.
     #
-    # This allows us to distinguish:
+    # .VERSION contains the Git commit associated with the user's
+    # previous Klippain configuration.
     #
-    #   - removed upstream variables the user customized
-    #   - removed upstream variables left at their old default
-    #   - completely custom user variables
-    # ------------------------------------------------------------
+    # This lets us distinguish:
+    #
+    #   old upstream variable + unchanged
+    #       -> safe to remove if upstream removed it
+    #
+    #   old upstream variable + user customized
+    #       -> preserve as #deprecated
+    #
+    #   never existed upstream
+    #       -> preserve as custom user variable
+    #
+    # ============================================================
 
     if [[ -f "${BACKUP_DIR}/.VERSION" ]]; then
-        previous_version="$(tr -d '[:space:]' < "${BACKUP_DIR}/.VERSION")"
+
+        previous_version="$(
+            tr -d '[:space:]' < "${BACKUP_DIR}/.VERSION"
+        )"
 
         if [[ -n "$previous_version" ]] &&
            git -C "${FRIX_CONFIG_PATH}" cat-file -e \
-           "${previous_version}^{commit}" 2>/dev/null; then
+               "${previous_version}^{commit}" 2>/dev/null; then
 
             old_variables_template="$(
                 mktemp "${USER_CONFIG_PATH}/.variables.old.XXXXXX"
@@ -204,26 +236,55 @@ function update_user_templates {
 
                 rm -f "$old_variables_template"
                 old_variables_template=""
+
+                echo \
+                    "[CONFIG-UPDATE] Historical variables template unavailable."
+
+            else
+
+                echo \
+                    "[CONFIG-UPDATE] Previous variables template recovered."
+
             fi
+
+        else
+
+            echo \
+                "[CONFIG-UPDATE] Previous Klippain commit unavailable locally."
+
         fi
+
     fi
 
+
+    # ============================================================
+    # variables.cfg
+    # ============================================================
+
     if [[ -f "$old_variables" && -f "$new_variables" ]]; then
+
         migrate_variables_config \
             "$old_variables" \
             "$new_variables" \
             "$live_variables" \
             "$old_variables_template"
 
-        if [[ -n "$old_variables_template" ]]; then
-            rm -f "$old_variables_template"
-        fi
     else
+
         echo "[CONFIG-UPDATE] WARNING: Unable to migrate variables.cfg."
         echo "[CONFIG-UPDATE] Old config or new template is missing."
+
     fi
 
-    printf "[CONFIG-UPDATE] User configuration migration complete!\n\n"
+
+    # Remove temporary historical template.
+    if [[ -n "$old_variables_template" ]]; then
+        rm -f "$old_variables_template"
+    fi
+
+
+    printf \
+        "[CONFIG-UPDATE] User configuration migration complete!\n\n"
 }
 
 
@@ -245,32 +306,24 @@ function migrate_printer_config {
 
     mkdir -p "$config_dir"
 
-    # Keep the temporary file on the same filesystem as the
-    # destination so the final mv is atomic.
-    tmp_file="$(mktemp "${config_dir}/.${config_name}.update.XXXXXX")" || {
+    tmp_file="$(
+        mktemp "${config_dir}/.${config_name}.update.XXXXXX"
+    )" || {
         echo "[ERROR] Unable to create printer.cfg temporary file."
         return 1
     }
 
     echo "[CONFIG-UPDATE] Updating printer.cfg..."
 
+
     if ! awk '
 
     # ------------------------------------------------------------
-    # Extract and normalize an [include ...] directive.
-    #
-    # Examples:
-    #
-    #   [include config/foo.cfg]
-    #   # [include config/foo.cfg]
-    #   # [include config/foo.cfg] # description
-    #
-    # all return:
-    #
-    #   [include config/foo.cfg]
+    # Extract normalized [include ...] directive.
     # ------------------------------------------------------------
 
     function get_include(line, result, endpos) {
+
         result = line
 
         sub(/\r$/, "", result)
@@ -290,22 +343,28 @@ function migrate_printer_config {
 
 
     # ============================================================
-    # FIRST FILE: EXISTING USER printer.cfg
+    # EXISTING USER printer.cfg
     # ============================================================
 
     NR == FNR {
+
         key = get_include($0)
 
         if (key != "") {
-            old_exists[key] = 1
-            old_order[++old_count] = key
-            old_original[key] = $0
 
-            test = $0
-            sub(/^[[:space:]]*/, "", test)
+            # Ignore exact duplicate includes.
+            if (!(key in old_exists)) {
 
-            if (test !~ /^#/)
-                old_active[key] = 1
+                old_exists[key] = 1
+                old_order[++old_count] = key
+                old_original[key] = $0
+
+                test = $0
+                sub(/^[[:space:]]*/, "", test)
+
+                if (test !~ /^#/)
+                    old_active[key] = 1
+            }
         }
 
         next
@@ -313,7 +372,7 @@ function migrate_printer_config {
 
 
     # ============================================================
-    # SECOND FILE: NEW printer.cfg TEMPLATE
+    # NEW TEMPLATE
     # ============================================================
 
     {
@@ -322,35 +381,45 @@ function migrate_printer_config {
         key = get_include($0)
 
         if (key != "") {
+
             new_exists[key] = 1
-            new_line_number[key] = new_count
+
+            # Use the first occurrence as the custom-include anchor.
+            if (!(key in new_line_number))
+                new_line_number[key] = new_count
         }
     }
 
 
     # ============================================================
-    # BUILD MERGED printer.cfg
+    # BUILD RESULT
     # ============================================================
 
     END {
 
+        matched_count = 0
+        new_include_count = 0
+        custom_count = 0
+
+
         # --------------------------------------------------------
-        # Find old/custom includes that no longer exist in the
-        # current template.
-        #
-        # Anchor each one to the closest preceding include from the
-        # old file that still exists in the new template.
+        # Determine custom includes and their anchors.
         # --------------------------------------------------------
 
         for (i = 1; i <= old_count; i++) {
+
             key = old_order[i]
 
             if (key in new_exists)
                 continue
 
+            custom_count++
             anchor = ""
 
+
+            # Find closest preceding surviving include.
             for (j = i - 1; j >= 1; j--) {
+
                 previous = old_order[j]
 
                 if (previous in new_exists) {
@@ -359,132 +428,243 @@ function migrate_printer_config {
                 }
             }
 
+
             if (anchor != "") {
+
                 line_number = new_line_number[anchor]
+
                 insert_count[line_number]++
 
-                insert_after[line_number, insert_count[line_number]] = old_original[key]
-            }
-            else {
-                orphan_count++
-                orphan[orphan_count] = old_original[key]
+                insert_after[
+                    line_number SUBSEP insert_count[line_number]
+                ] = old_original[key]
+
+            } else {
+
+                # No previous anchor. Try the closest following
+                # surviving include.
+                next_anchor = ""
+
+                for (j = i + 1; j <= old_count; j++) {
+
+                    following = old_order[j]
+
+                    if (following in new_exists) {
+                        next_anchor = following
+                        break
+                    }
+                }
+
+
+                if (next_anchor != "") {
+
+                    line_number = new_line_number[next_anchor]
+
+                    insert_before_count[line_number]++
+
+                    insert_before[
+                        line_number SUBSEP insert_before_count[line_number]
+                    ] = old_original[key]
+
+                } else {
+
+                    orphan_count++
+                    orphan[orphan_count] = old_original[key]
+
+                }
             }
         }
 
 
         # --------------------------------------------------------
-        # Process the new template.
+        # Count template include categories.
+        # --------------------------------------------------------
+
+        for (key in new_exists) {
+
+            if (key in old_exists)
+                matched_count++
+            else
+                new_include_count++
+        }
+
+
+        # --------------------------------------------------------
+        # Output new template.
         # --------------------------------------------------------
 
         for (i = 1; i <= new_count; i++) {
+
+            # Custom includes that belong before this line.
+            if (i in insert_before_count) {
+
+                for (
+                    j = 1;
+                    j <= insert_before_count[i];
+                    j++
+                ) {
+                    print insert_before[
+                        i SUBSEP j
+                    ]
+                }
+            }
+
+
             line = new_lines[i]
             key = get_include(line)
 
+
             if (key != "" && key in old_exists) {
 
-                # Strip the template comment marker for comparison
-                # and possible activation.
+                # Remove template comment prefix.
                 content = line
-                sub(/^[[:space:]]*#[[:space:]]*/, "", content)
+
+                leading = ""
+                temp = content
+
+                match(temp, /^[[:space:]]*/)
+                leading = substr(temp, 1, RLENGTH)
+                content = substr(temp, RLENGTH + 1)
+
+                sub(/^#[[:space:]]*/, "", content)
+
 
                 if (key in old_active) {
-                    # Include was active in the old config.
-                    line = content
-                }
-                else {
-                    # Include existed but was disabled in old config.
-                    line = "# " content
+
+                    # Previously active.
+                    line = leading content
+
+                } else {
+
+                    # Previously disabled.
+                    line = leading "# " content
                 }
             }
+
 
             print line
 
 
-            # ----------------------------------------------------
-            # Insert custom includes anchored after this line.
-            # ----------------------------------------------------
-
+            # Custom includes anchored after this line.
             if (i in insert_count) {
-                for (j = 1; j <= insert_count[i]; j++) {
-                    print insert_after[i, j]
+
+                for (
+                    j = 1;
+                    j <= insert_count[i];
+                    j++
+                ) {
+                    print insert_after[
+                        i SUBSEP j
+                    ]
                 }
             }
         }
 
 
         # --------------------------------------------------------
-        # Preserve custom includes for which no usable preceding
-        # anchor exists.
+        # Includes with no usable anchor.
         # --------------------------------------------------------
 
         if (orphan_count > 0) {
+
             print ""
             print "# ------------------------------------------------"
             print "# Preserved custom includes from previous config"
             print "# ------------------------------------------------"
 
-            for (i = 1; i <= orphan_count; i++) {
+            for (i = 1; i <= orphan_count; i++)
                 print orphan[i]
-            }
+        }
+
+
+        # --------------------------------------------------------
+        # Statistics
+        # --------------------------------------------------------
+
+        print \
+            "[CONFIG-UPDATE]   " matched_count \
+            " existing includes preserved" > "/dev/stderr"
+
+        print \
+            "[CONFIG-UPDATE]   " new_include_count \
+            " new includes available" > "/dev/stderr"
+
+        if (custom_count > 0) {
+
+            print \
+                "[CONFIG-UPDATE]   " custom_count \
+                " custom includes preserved" > "/dev/stderr"
         }
     }
 
     ' "$old_config" "$new_template" > "$tmp_file"; then
+
         echo "[ERROR] Failed to generate updated printer.cfg."
+
         rm -f "$tmp_file"
+
         return 1
     fi
 
 
-    # ------------------------------------------------------------
-    # Validate generated configuration.
-    # ------------------------------------------------------------
+    # ============================================================
+    # Validation
+    # ============================================================
 
     if [[ ! -s "$tmp_file" ]]; then
+
         echo "[ERROR] Generated printer.cfg is empty."
+
         rm -f "$tmp_file"
+
         return 1
     fi
+
 
     if ! grep -qE \
         '^[[:space:]]*#?[[:space:]]*\[include[[:space:]]+' \
         "$tmp_file"; then
 
         echo "[ERROR] Generated printer.cfg contains no includes."
+
         rm -f "$tmp_file"
+
         return 1
     fi
 
 
-    # ------------------------------------------------------------
-    # Preserve existing permissions/ownership where possible.
-    # ------------------------------------------------------------
-
+    # Preserve permissions/ownership.
     if [[ -f "$output_config" ]]; then
-        chmod --reference="$output_config" "$tmp_file" 2>/dev/null || true
-        chown --reference="$output_config" "$tmp_file" 2>/dev/null || true
+
+        chmod \
+            --reference="$output_config" \
+            "$tmp_file" \
+            2>/dev/null || true
+
+        chown \
+            --reference="$output_config" \
+            "$tmp_file" \
+            2>/dev/null || true
     fi
 
 
-    # ------------------------------------------------------------
     # Atomic replacement.
-    # ------------------------------------------------------------
-
     if ! mv -f "$tmp_file" "$output_config"; then
+
         echo "[ERROR] Unable to install updated printer.cfg."
+
         rm -f "$tmp_file"
+
         return 1
     fi
+
 
     echo "[CONFIG-UPDATE] printer.cfg successfully migrated."
 }
 
+
 # ================================================================
 # VARIABLES.CFG MIGRATION
-#
-# Uses Python because variables.cfg contains Python-style multiline
-# dictionaries. Parsing these safely in awk would be unnecessarily
-# fragile.
 # ================================================================
 
 function migrate_variables_config {
@@ -502,13 +682,16 @@ function migrate_variables_config {
 
     mkdir -p "$config_dir"
 
-    tmp_file="$(mktemp \
-        "${config_dir}/.${config_name}.update.XXXXXX")" || {
+    tmp_file="$(
+        mktemp "${config_dir}/.${config_name}.update.XXXXXX"
+    )" || {
         echo "[ERROR] Unable to create variables.cfg temporary file."
         return 1
     }
 
+
     echo "[CONFIG-UPDATE] Updating variables.cfg..."
+
 
     if ! python3 - \
         "$old_config" \
@@ -516,10 +699,15 @@ function migrate_variables_config {
         "$tmp_file" \
         "$old_template" <<'PYTHON'
 
+import ast
 import re
 import sys
 from pathlib import Path
 
+
+# ================================================================
+# INPUTS
+# ================================================================
 
 old_path = Path(sys.argv[1])
 template_path = Path(sys.argv[2])
@@ -531,36 +719,22 @@ old_template_path = (
     else None
 )
 
-# ----------------------------------------------------------------
-# Parse the template from the previously installed Klippain
-# version, if available.
-# ----------------------------------------------------------------
 
-old_template_vars = {}
-
-if (
-    old_template_path is not None
-    and old_template_path.is_file()
-):
-
-    old_template_lines = old_template_path.read_text(
-        encoding="utf-8"
-    ).splitlines()
-
-    old_template_vars = parse_variables(
-        old_template_lines
-    )
-
-# ----------------------------------------------------------------
-# Patterns / constants
-# ----------------------------------------------------------------
+# ================================================================
+# CONSTANTS
+# ================================================================
 
 VARIABLE_RE = re.compile(
     r'^(\s*)(variable_[A-Za-z0-9_]+)(\s*:\s*)(.*)$'
 )
 
 NEW_DEFAULT_RE = re.compile(
-    r'\s+#new default=.*$',
+    r'\s+#new\s+default=.*$',
+    re.IGNORECASE
+)
+
+DEPRECATED_RE = re.compile(
+    r'\s+#deprecated\s*$',
     re.IGNORECASE
 )
 
@@ -569,55 +743,44 @@ MULTILINE_NOTICE = (
     "see current Klippain variables.cfg"
 )
 
+DEPRECATED_MULTILINE_NOTICE = (
+    "# DEPRECATED - variable removed "
+    "from current Klippain template"
+)
 
-# ----------------------------------------------------------------
-# Utility functions
-# ----------------------------------------------------------------
+
+# ================================================================
+# CLEANUP HELPERS
+# ================================================================
 
 def strip_new_default(text):
-    """
-    Remove an annotation previously added by this updater.
-
-    Example:
-
-        300 #new default=350
-
-    becomes:
-
-        300
-    """
-
     return NEW_DEFAULT_RE.sub("", text).rstrip()
 
 
+def strip_deprecated(text):
+    return DEPRECATED_RE.sub("", text).rstrip()
+
+
+def strip_migration_annotations(text):
+    text = strip_new_default(text)
+    text = strip_deprecated(text)
+    return text.rstrip()
+
+
+# ================================================================
+# COMMENT PARSER
+# ================================================================
+
 def split_inline_comment(text):
     """
-    Separate the actual variable value from an inline Klipper
-    comment.
-
-    This intentionally only treats # as a comment when it is
-    outside quotes.
-
-    Examples:
-
-        300 # my setting
-
-    returns:
-
-        ("300", "# my setting")
-
-
-        "abc#123"
-
-    returns:
-
-        ("\"abc#123\"", "")
+    Split an inline # comment while ignoring # characters inside
+    quoted strings.
     """
 
     quote = None
     escaped = False
 
-    for i, char in enumerate(text):
+    for index, char in enumerate(text):
 
         if escaped:
             escaped = False
@@ -628,8 +791,10 @@ def split_inline_comment(text):
             continue
 
         if quote is not None:
+
             if char == quote:
                 quote = None
+
             continue
 
         if char in ("'", '"'):
@@ -637,19 +802,22 @@ def split_inline_comment(text):
             continue
 
         if char == "#":
-            value = text[:i].rstrip()
-            comment = text[i:].strip()
-            return value, comment
+
+            return (
+                text[:index].rstrip(),
+                text[index:].strip(),
+            )
 
     return text.rstrip(), ""
 
 
+# ================================================================
+# MULTILINE DETECTION
+# ================================================================
+
 def brace_delta(text):
     """
-    Count {}, [] and () while ignoring characters inside strings.
-
-    Used only to determine where a multiline Python-style
-    dictionary/list/tuple ends.
+    Count (), [] and {} outside quoted strings.
     """
 
     delta = 0
@@ -665,6 +833,7 @@ def brace_delta(text):
         ")": -1,
     }
 
+
     for char in text:
 
         if escaped:
@@ -676,8 +845,10 @@ def brace_delta(text):
             continue
 
         if quote is not None:
+
             if char == quote:
                 quote = None
+
             continue
 
         if char in ("'", '"'):
@@ -686,34 +857,20 @@ def brace_delta(text):
 
         delta += pairs.get(char, 0)
 
+
     return delta
 
 
-# ----------------------------------------------------------------
-# Parse variables.cfg
-# ----------------------------------------------------------------
+# ================================================================
+# VARIABLE PARSER
+# ================================================================
 
 def parse_variables(lines):
-    """
-    Parse variable definitions.
-
-    Returns a dict keyed by variable name.
-
-    Each entry contains:
-
-        start
-        end
-        lines
-        multiline
-        prefix
-        raw_rhs
-        value
-        comment
-    """
 
     variables = {}
 
     i = 0
+
 
     while i < len(lines):
 
@@ -723,6 +880,7 @@ def parse_variables(lines):
             i += 1
             continue
 
+
         name = match.group(2)
 
         prefix = (
@@ -731,8 +889,10 @@ def parse_variables(lines):
             + match.group(3)
         )
 
-        # Remove an annotation created by a previous migration.
-        rhs = strip_new_default(match.group(4))
+
+        rhs = strip_migration_annotations(
+            match.group(4)
+        )
 
         value, comment = split_inline_comment(rhs)
 
@@ -741,123 +901,178 @@ def parse_variables(lines):
 
         depth = brace_delta(value)
 
-        # Continue until a multiline dictionary/list/tuple closes.
+
         while depth > 0 and end + 1 < len(lines):
+
             end += 1
-            depth += brace_delta(lines[end])
+
+            depth += brace_delta(
+                lines[end]
+            )
+
 
         block = lines[i:end + 1]
 
+
         variables[name] = {
+            "name": name,
             "start": start,
             "end": end,
             "lines": block,
             "multiline": end > i,
             "prefix": prefix,
-            "raw_rhs": rhs,
             "value": value.strip(),
             "comment": comment,
         }
 
+
         i = end + 1
+
 
     return variables
 
 
-# ----------------------------------------------------------------
-# Normalize values for comparison
-# ----------------------------------------------------------------
+# ================================================================
+# NORMALIZED VALUE
+# ================================================================
 
-def normalized_value(entry):
+def raw_value_text(entry):
     """
-    Return only the meaningful variable value.
-
-    Existing migration annotations and inline comments are ignored
-    for default comparison.
+    Return the variable's value without migration annotations or
+    user comments.
     """
-
-    if not entry["multiline"]:
-        return entry["value"].strip()
 
     lines = entry["lines"]
 
-    first_match = VARIABLE_RE.match(lines[0])
-
-    if not first_match:
+    if not lines:
         return ""
 
-    first_rhs = strip_new_default(first_match.group(4))
 
-    first_value, _ = split_inline_comment(first_rhs)
+    match = VARIABLE_RE.match(lines[0])
 
-    values = [first_value.rstrip()]
+    if not match:
+        return ""
+
+
+    first_rhs = strip_migration_annotations(
+        match.group(4)
+    )
+
+    first_value, _ = split_inline_comment(
+        first_rhs
+    )
+
+
+    if not entry["multiline"]:
+        return first_value.strip()
+
+
+    result = [first_value.rstrip()]
 
     for line in lines[1:]:
-        values.append(line.rstrip())
-
-    return "\n".join(values).strip()
+        result.append(line.rstrip())
 
 
-# ----------------------------------------------------------------
-# Build a single-line variable
-# ----------------------------------------------------------------
+    return "\n".join(result).strip()
+
+
+def normalized_value(entry):
+    """
+    Prefer semantic Python-literal comparison.
+
+    This prevents harmless whitespace/formatting changes in a
+    dictionary from being reported as a new default.
+
+    Fall back to normalized text if the value is not a valid Python
+    literal.
+    """
+
+    raw = raw_value_text(entry)
+
+
+    try:
+
+        value = ast.literal_eval(raw)
+
+        return (
+            "literal",
+            value,
+        )
+
+    except (ValueError, SyntaxError):
+
+        normalized = "\n".join(
+            line.strip()
+            for line in raw.splitlines()
+        ).strip()
+
+        return (
+            "text",
+            normalized,
+        )
+
+
+def values_equal(first, second):
+    return normalized_value(first) == normalized_value(second)
+
+
+# ================================================================
+# SINGLE-LINE OUTPUT
+# ================================================================
 
 def make_single_line(old_entry, new_entry):
-    """
-    Preserve the user's current value.
-
-    If the template default changed, append:
-
-        #new default=X
-
-    Existing user comments are also preserved.
-    """
 
     old_value = old_entry["value"]
     old_comment = old_entry["comment"]
 
     new_value = new_entry["value"]
 
-    # Preserve the formatting before the value from the NEW
-    # template. This lets upstream formatting changes propagate.
-    prefix = new_entry["prefix"]
+    # Use formatting from current template before the value.
+    result = (
+        new_entry["prefix"]
+        + old_value
+    )
 
-    result = prefix + old_value
 
     # Preserve user's inline comment.
     if old_comment:
         result += " " + old_comment
 
-    # Only add an annotation when the meaningful values differ.
-    if old_value.strip() != new_value.strip():
-        result += f" #new default={new_value.strip()}"
+
+    # Add current upstream default if user value differs.
+    if not values_equal(old_entry, new_entry):
+
+        result += (
+            " #new default="
+            + new_value
+        )
+
 
     return [result]
 
 
-# ----------------------------------------------------------------
-# Build a multiline variable
-# ----------------------------------------------------------------
+# ================================================================
+# MULTILINE OUTPUT
+# ================================================================
 
-def make_multiline(old_entry, new_entry):
-    """
-    Preserve the user's complete multiline block.
+def clean_old_block(entry):
 
-    A changed upstream default receives one notice immediately
-    above the variable.
-    """
+    block = list(entry["lines"])
 
-    old_value = normalized_value(old_entry)
-    new_value = normalized_value(new_entry)
+    if not block:
+        return block
 
-    # Clean the first line in case it contains an old single-line
-    # migration annotation.
-    block = list(old_entry["lines"])
 
-    first_match = VARIABLE_RE.match(block[0])
+    first_match = VARIABLE_RE.match(
+        block[0]
+    )
+
 
     if first_match:
-        clean_rhs = strip_new_default(first_match.group(4))
+
+        clean_rhs = strip_migration_annotations(
+            first_match.group(4)
+        )
 
         block[0] = (
             first_match.group(1)
@@ -866,15 +1081,27 @@ def make_multiline(old_entry, new_entry):
             + clean_rhs
         )
 
-    if old_value == new_value:
+
+    return block
+
+
+def make_multiline(old_entry, new_entry):
+
+    block = clean_old_block(old_entry)
+
+
+    if values_equal(old_entry, new_entry):
         return block
 
-    return [MULTILINE_NOTICE] + block
+
+    return [
+        MULTILINE_NOTICE
+    ] + block
 
 
-# ----------------------------------------------------------------
-# Read files
-# ----------------------------------------------------------------
+# ================================================================
+# READ FILES
+# ================================================================
 
 old_lines = old_path.read_text(
     encoding="utf-8"
@@ -885,50 +1112,77 @@ template_lines = template_path.read_text(
 ).splitlines()
 
 
-# Remove multiline notices created by a previous migration from the
-# old file before parsing/output.
+# Remove notices created by previous migrations.
 old_lines = [
     line
     for line in old_lines
-    if line.strip() != MULTILINE_NOTICE
+    if line.strip() not in (
+        MULTILINE_NOTICE,
+        DEPRECATED_MULTILINE_NOTICE,
+    )
 ]
 
 
-old_vars = parse_variables(old_lines)
-new_vars = parse_variables(template_lines)
+old_vars = parse_variables(
+    old_lines
+)
+
+new_vars = parse_variables(
+    template_lines
+)
 
 
-# ----------------------------------------------------------------
-# Statistics
-# ----------------------------------------------------------------
+# ================================================================
+# HISTORICAL TEMPLATE
+# ================================================================
+
+old_template_vars = {}
+
+
+if (
+    old_template_path is not None
+    and old_template_path.is_file()
+):
+
+    old_template_lines = (
+        old_template_path.read_text(
+            encoding="utf-8"
+        ).splitlines()
+    )
+
+    old_template_vars = parse_variables(
+        old_template_lines
+    )
+
+
+historical_template_available = bool(
+    old_template_vars
+)
+
+
+# ================================================================
+# STATISTICS
+# ================================================================
 
 preserved = 0
 new_count = 0
 changed_defaults = 0
 multiline_changed = 0
+
+deprecated_count = 0
+obsolete_removed_count = 0
 custom_count = 0
+unknown_preserved_count = 0
 
 
-# ----------------------------------------------------------------
-# Build the output from the NEW template.
-#
-# This means:
-#
-#   NEW template:
-#       structure
-#       documentation
-#       comments
-#       newly introduced variables
-#
-#   OLD user file:
-#       existing variable values
-#       custom variables
-#
-# ----------------------------------------------------------------
+# ================================================================
+# BUILD FROM CURRENT TEMPLATE
+# ================================================================
 
 output = []
 
 i = 0
+
 
 while i < len(template_lines):
 
@@ -936,55 +1190,67 @@ while i < len(template_lines):
 
     match = VARIABLE_RE.match(line)
 
+
     if not match:
+
         output.append(line)
         i += 1
         continue
 
+
     name = match.group(2)
+
     new_entry = new_vars[name]
 
 
     # ------------------------------------------------------------
-    # Brand-new upstream variable
+    # Brand-new upstream variable.
     # ------------------------------------------------------------
 
     if name not in old_vars:
 
-        output.extend(new_entry["lines"])
+        output.extend(
+            new_entry["lines"]
+        )
 
         new_count += 1
 
         i = new_entry["end"] + 1
+
         continue
 
 
     # ------------------------------------------------------------
-    # Existing variable
+    # Existing variable.
     # ------------------------------------------------------------
 
     old_entry = old_vars[name]
 
-    old_value = normalized_value(old_entry)
-    new_value = normalized_value(new_entry)
-
     preserved += 1
 
-    if old_value != new_value:
+
+    changed = not values_equal(
+        old_entry,
+        new_entry
+    )
+
+
+    if changed:
         changed_defaults += 1
 
 
-    # If either side is multiline, treat the variable as a complete
-    # block rather than attempting to merge dictionary members.
-    if old_entry["multiline"] or new_entry["multiline"]:
+    if (
+        old_entry["multiline"]
+        or new_entry["multiline"]
+    ):
 
-        if old_value != new_value:
+        if changed:
             multiline_changed += 1
 
         output.extend(
             make_multiline(
                 old_entry,
-                new_entry
+                new_entry,
             )
         )
 
@@ -993,7 +1259,7 @@ while i < len(template_lines):
         output.extend(
             make_single_line(
                 old_entry,
-                new_entry
+                new_entry,
             )
         )
 
@@ -1001,170 +1267,180 @@ while i < len(template_lines):
     i = new_entry["end"] + 1
 
 
-# ----------------------------------------------------------------
-# Handle variables absent from the new template.
-#
-# There are three possible cases:
-#
-# 1. Variable existed in the previous upstream template and the
-#    user changed it:
-#
-#       Preserve + #deprecated
-#
-# 2. Variable existed in the previous upstream template and the
-#    user never changed it:
-#
-#       Drop it. Upstream intentionally removed it.
-#
-# 3. Variable never existed in the previous upstream template:
-#
-#       It is a user-created/custom variable. Preserve it without
-#       marking it deprecated.
-#
-# If the previous template cannot be retrieved, preserve unknown
-# variables rather than risk deleting user configuration.
-# ----------------------------------------------------------------
+# ================================================================
+# VARIABLES ABSENT FROM CURRENT TEMPLATE
+# ================================================================
 
-removed_variables = [
+removed_names = [
     name
     for name in old_vars
     if name not in new_vars
 ]
 
-deprecated_count = 0
-removed_default_count = 0
-custom_count = 0
 
-
-if removed_variables:
-
-    preserved_removed = []
-
-    removed_variables.sort(
-        key=lambda name: old_vars[name]["start"]
-    )
-
-    for name in removed_variables:
-
-        user_entry = old_vars[name]
-
-        # --------------------------------------------------------
-        # Was this an upstream variable in the previous version?
-        # --------------------------------------------------------
-
-        if name in old_template_vars:
-
-            old_default_entry = old_template_vars[name]
-
-            user_value = normalized_value(user_entry)
-            old_default = normalized_value(old_default_entry)
-
-            # User never changed the old upstream default.
-            #
-            # Since upstream removed the variable, do not carry it
-            # into the new configuration.
-            if user_value == old_default:
-                removed_default_count += 1
-                continue
-
-            # User modified an upstream variable that has since
-            # disappeared. Preserve it and mark it deprecated.
-            preserved_removed.append(
-                ("deprecated", name)
-            )
-
-            deprecated_count += 1
-
-        else:
-
-            # ----------------------------------------------------
-            # Variable did not exist in the previous upstream
-            # template. Treat it as a user-created variable.
-            # ----------------------------------------------------
-
-            preserved_removed.append(
-                ("custom", name)
-            )
-
-            custom_count += 1
-
-
-    if preserved_removed:
-
-        output.extend([
-            "",
-            "# ------------------------------------------------",
-            "# Preserved variables from previous configuration",
-            "# ------------------------------------------------",
-        ])
-
-
-        for variable_type, name in preserved_removed:
-
-            entry = old_vars[name]
-            block = list(entry["lines"])
-
-            first_match = VARIABLE_RE.match(block[0])
-
-            if first_match:
-
-                # Remove any obsolete #new default annotation.
-                clean_rhs = strip_new_default(
-                    first_match.group(4)
-                )
-
-                # Also remove an old deprecated annotation so the
-                # operation remains idempotent.
-                clean_rhs = re.sub(
-                    r'\s+#deprecated\s*$',
-                    "",
-                    clean_rhs,
-                    flags=re.IGNORECASE
-                ).rstrip()
-
-                if variable_type == "deprecated":
-
-                    if entry["multiline"]:
-
-                        # Keep multiline annotation above the block.
-                        block.insert(
-                            0,
-                            "# DEPRECATED - variable removed "
-                            "from current Klippain template"
-                        )
-
-                    else:
-
-                        clean_rhs += " #deprecated"
-
-
-                block[
-                    1 if (
-                        variable_type == "deprecated"
-                        and entry["multiline"]
-                    ) else 0
-                ] = (
-                    first_match.group(1)
-                    + first_match.group(2)
-                    + first_match.group(3)
-                    + clean_rhs
-                )
-
-            output.extend(block)
-
-# ----------------------------------------------------------------
-# Write generated file
-# ----------------------------------------------------------------
-
-output_path.write_text(
-    "\n".join(output) + "\n",
-    encoding="utf-8"
+removed_names.sort(
+    key=lambda name: old_vars[name]["start"]
 )
 
 
-# ----------------------------------------------------------------
-# Migration report
-# ----------------------------------------------------------------
+preserved_removed = []
+
+
+for name in removed_names:
+
+    user_entry = old_vars[name]
+
+
+    # ------------------------------------------------------------
+    # Historical template is available and this variable existed
+    # upstream previously.
+    # ------------------------------------------------------------
+
+    if name in old_template_vars:
+
+        historical_entry = old_template_vars[name]
+
+
+        # User left it at the historical default.
+        #
+        # Upstream removed it, so allow it to disappear.
+        if values_equal(
+            user_entry,
+            historical_entry,
+        ):
+
+            obsolete_removed_count += 1
+
+            continue
+
+
+        # User changed the value.
+        #
+        # Preserve it but explicitly identify that upstream no
+        # longer defines it.
+        preserved_removed.append(
+            (
+                "deprecated",
+                name,
+            )
+        )
+
+        deprecated_count += 1
+
+        continue
+
+
+    # ------------------------------------------------------------
+    # Historical template is available but this variable did not
+    # exist in it.
+    #
+    # It is therefore user-created.
+    # ------------------------------------------------------------
+
+    if historical_template_available:
+
+        preserved_removed.append(
+            (
+                "custom",
+                name,
+            )
+        )
+
+        custom_count += 1
+
+        continue
+
+
+    # ------------------------------------------------------------
+    # Historical template unavailable.
+    #
+    # We cannot safely determine whether this is:
+    #
+    #   - a removed upstream variable
+    #   - a custom user variable
+    #
+    # Preserve it without claiming it is deprecated.
+    # ------------------------------------------------------------
+
+    preserved_removed.append(
+        (
+            "unknown",
+            name,
+        )
+    )
+
+    unknown_preserved_count += 1
+
+
+# ================================================================
+# OUTPUT PRESERVED REMOVED/CUSTOM VARIABLES
+# ================================================================
+
+if preserved_removed:
+
+    output.extend([
+        "",
+        "# ------------------------------------------------",
+        "# Preserved variables from previous configuration",
+        "# ------------------------------------------------",
+    ])
+
+
+    for variable_type, name in preserved_removed:
+
+        entry = old_vars[name]
+
+        block = clean_old_block(entry)
+
+
+        if variable_type == "deprecated":
+
+            if entry["multiline"]:
+
+                block.insert(
+                    0,
+                    DEPRECATED_MULTILINE_NOTICE,
+                )
+
+            else:
+
+                first_match = VARIABLE_RE.match(
+                    block[0]
+                )
+
+                if first_match:
+
+                    clean_rhs = (
+                        strip_migration_annotations(
+                            first_match.group(4)
+                        )
+                    )
+
+                    block[0] = (
+                        first_match.group(1)
+                        + first_match.group(2)
+                        + first_match.group(3)
+                        + clean_rhs
+                        + " #deprecated"
+                    )
+
+
+        output.extend(block)
+
+
+# ================================================================
+# WRITE RESULT
+# ================================================================
+
+output_path.write_text(
+    "\n".join(output) + "\n",
+    encoding="utf-8",
+)
+
+
+# ================================================================
+# REPORT
+# ================================================================
 
 print(
     f"[CONFIG-UPDATE]   "
@@ -1181,6 +1457,7 @@ print(
     f"{changed_defaults} variables have new defaults"
 )
 
+
 if multiline_changed:
 
     print(
@@ -1189,19 +1466,24 @@ if multiline_changed:
         f"have new defaults"
     )
 
+
 if deprecated_count:
 
     print(
         f"[CONFIG-UPDATE]   "
-        f"{deprecated_count} modified variables are now deprecated"
+        f"{deprecated_count} customized variables "
+        f"are now deprecated"
     )
 
-if removed_default_count:
+
+if obsolete_removed_count:
 
     print(
         f"[CONFIG-UPDATE]   "
-        f"{removed_default_count} obsolete default variables removed"
+        f"{obsolete_removed_count} obsolete default "
+        f"variables removed"
     )
+
 
 if custom_count:
 
@@ -1209,22 +1491,37 @@ if custom_count:
         f"[CONFIG-UPDATE]   "
         f"{custom_count} custom user variables preserved"
     )
-    
+
+
+if unknown_preserved_count:
+
+    print(
+        f"[CONFIG-UPDATE]   "
+        f"{unknown_preserved_count} unclassified variables "
+        f"preserved because historical template was unavailable"
+    )
+
 PYTHON
     then
+
         echo "[ERROR] Failed to generate updated variables.cfg."
+
         rm -f "$tmp_file"
+
         return 1
     fi
 
 
-    # ------------------------------------------------------------
-    # Validation
-    # ------------------------------------------------------------
+    # ============================================================
+    # VALIDATION
+    # ============================================================
 
     if [[ ! -s "$tmp_file" ]]; then
+
         echo "[ERROR] Generated variables.cfg is empty."
+
         rm -f "$tmp_file"
+
         return 1
     fi
 
@@ -1234,7 +1531,9 @@ PYTHON
         "$tmp_file"; then
 
         echo "[ERROR] Generated variables.cfg contains no variables."
+
         rm -f "$tmp_file"
+
         return 1
     fi
 
@@ -1243,15 +1542,18 @@ PYTHON
         '[gcode_macro _USER_VARIABLES]' \
         "$tmp_file"; then
 
-        echo "[ERROR] Generated variables.cfg is missing _USER_VARIABLES."
+        echo \
+            "[ERROR] Generated variables.cfg is missing _USER_VARIABLES."
+
         rm -f "$tmp_file"
+
         return 1
     fi
 
 
-    # ------------------------------------------------------------
-    # Preserve permissions
-    # ------------------------------------------------------------
+    # ============================================================
+    # PRESERVE PERMISSIONS
+    # ============================================================
 
     if [[ -f "$output_config" ]]; then
 
@@ -1267,9 +1569,9 @@ PYTHON
     fi
 
 
-    # ------------------------------------------------------------
-    # Atomic replacement
-    # ------------------------------------------------------------
+    # ============================================================
+    # ATOMIC REPLACEMENT
+    # ============================================================
 
     if ! mv -f "$tmp_file" "$output_config"; then
 
@@ -1284,18 +1586,23 @@ PYTHON
     echo "[CONFIG-UPDATE] variables.cfg successfully migrated."
 
 
-    # ------------------------------------------------------------
-    # Tell user when defaults need review.
-    # ------------------------------------------------------------
+    # ============================================================
+    # REVIEW NOTICE
+    # ============================================================
 
-    if grep -q '#new default=' "$output_config" ||
-       grep -qF \
-       '# NEW DEFAULT AVAILABLE - see current Klippain variables.cfg' \
-       "$output_config"; then
+    if grep -qE \
+        '#new default=|#deprecated|# DEPRECATED -' \
+        "$output_config"; then
 
-        echo "[CONFIG-UPDATE] NOTICE: New defaults are available."
-        echo "[CONFIG-UPDATE] Your existing values were NOT changed."
-        echo "[CONFIG-UPDATE] Review variables.cfg for details."
+        echo \
+            "[CONFIG-UPDATE] NOTICE: variables.cfg contains settings requiring review."
+
+        echo \
+            "[CONFIG-UPDATE] Existing user values were NOT automatically changed."
+
+        echo \
+            "[CONFIG-UPDATE] Review #new default and #deprecated annotations."
+
     fi
 }
 
