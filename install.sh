@@ -123,41 +123,772 @@ function backup_config {
     printf "[BACKUP] Backup of current user config files done in: ${BACKUP_DIR}\n\n"
 }
 
+# ================================================================
+# USER CONFIG MIGRATION
+#
+# During an update:
+#   - printer.cfg is rebuilt from the newest template while
+#     preserving the user's enabled includes and custom includes.
+#
+#   - variables.cfg is rebuilt from the newest template while
+#     preserving the user's existing variable values.
+#
+# Existing values are NEVER automatically changed to new defaults.
+# ================================================================
+
+function update_user_templates {
+    local old_printer="${BACKUP_DIR}/printer.cfg"
+    local old_variables="${BACKUP_DIR}/variables.cfg"
+
+    local new_printer="${FRIX_CONFIG_PATH}/user_templates/printer.cfg"
+    local new_variables="${FRIX_CONFIG_PATH}/user_templates/variables.cfg"
+
+    local live_printer="${USER_CONFIG_PATH}/printer.cfg"
+    local live_variables="${USER_CONFIG_PATH}/variables.cfg"
+
+    echo "[CONFIG-UPDATE] Migrating user configuration..."
+
+    if [[ -f "$old_printer" && -f "$new_printer" ]]; then
+        migrate_printer_config \
+            "$old_printer" \
+            "$new_printer" \
+            "$live_printer"
+    else
+        echo "[CONFIG-UPDATE] WARNING: Unable to migrate printer.cfg."
+        echo "[CONFIG-UPDATE] Old config or new template is missing."
+    fi
+
+    if [[ -f "$old_variables" && -f "$new_variables" ]]; then
+        migrate_variables_config \
+            "$old_variables" \
+            "$new_variables" \
+            "$live_variables"
+    else
+        echo "[CONFIG-UPDATE] WARNING: Unable to migrate variables.cfg."
+        echo "[CONFIG-UPDATE] Old config or new template is missing."
+    fi
+
+    printf "[CONFIG-UPDATE] User configuration migration complete!\n\n"
+}
+
+
+# ================================================================
+# PRINTER.CFG MIGRATION
+# ================================================================
+
+function migrate_printer_config {
+    local old_config="$1"
+    local new_template="$2"
+    local output_config="$3"
+
+    local config_dir
+    local config_name
+    local tmp_file
+
+    config_dir="$(dirname "$output_config")"
+    config_name="$(basename "$output_config")"
+
+    mkdir -p "$config_dir"
+
+    # Temporary file must be on the same filesystem as the final
+    # configuration so mv performs an atomic rename.
+    tmp_file="$(mktemp \
+        "${config_dir}/.${config_name}.update.XXXXXX")" || {
+        echo "[ERROR] Unable to create printer.cfg temporary file."
+        return 1
+    }
+
+    echo "[CONFIG-UPDATE] Updating printer.cfg..."
+
+    if ! awk '
+
+    # ------------------------------------------------------------
+    # Return the include portion of a line.
+    #
+    # Examples:
+    #
+    # [include config/foo.cfg]
+    #
+    # # [include config/foo.cfg] # description
+    #
+    # Both return:
+    #
+    # [include config/foo.cfg]
+    # ------------------------------------------------------------
+
+    function get_include(line, result, endpos) {
+        result = line
+
+        sub(/\r$/, "", result)
+        sub(/^[[:space:]]*/, "", result)
+        sub(/^#[[:space:]]*/, "", result)
+
+        if (result !~ /^\[include[[:space:]]+/)
+            return ""
+
+        endpos = index(result, "]")
+
+        if (endpos == 0)
+            return ""
+
+        result = substr(result, 1, endpos)
+
+        return result
+    }
+
+
+    # ============================================================
+    # OLD printer.cfg
+    # ============================================================
+
+    NR == FNR {
+
+        key = get_include($0)
+
+        if (key != "") {
+
+            old_exists[key] = 1
+            old_order[++old_count] = key
+
+            # Save the original line in case this is a custom
+            # include that no longer exists in the new template.
+            old_original[key] = $0
+
+            # Active include = first non-whitespace character
+            # is NOT "#".
+            test = $0
+            sub(/^[[:space:]]*/, "", test)
+
+            if (test !~ /^#/)
+                old_active[key] = 1
+        }
+
+        next
+    }
+
+
+    # ============================================================
+    # NEW printer.cfg TEMPLATE
+    # ============================================================
+
+    {
+        new_lines[++new_count] = $0
+
+        key = get_include($0)
+
+        if (key != "") {
+            new_exists[key] = 1
+            new_line_number[key] = new_count
+        }
+    }
+
+
+    # ============================================================
+    # BUILD NEW printer.cfg
+    # ============================================================
+
+    END {
+
+        # --------------------------------------------------------
+        # Locate custom includes from the old config.
+        #
+        # Custom includes are inserted immediately after the
+        # nearest preceding include that still exists in the
+        # new template.
+        # --------------------------------------------------------
+
+        for (i = 1; i <= old_count; i++) {
+
+            key = old_order[i]
+
+            if (key in new_exists)
+                continue
+
+            anchor = ""
+
+            for (j = i - 1; j >= 1; j--) {
+
+                previous = old_order[j]
+
+                if (previous in new_exists) {
+                    anchor = previous
+                    break
+                }
+            }
+
+            if (anchor != "") {
+
+                line_number = new_line_number[anchor]
+
+                insert_count[line_number]++
+
+                insert_after[
+                    line_number,
+                    insert_count[line_number]
+                ] = old_original[key]
+
+            } else {
+
+                orphan_count++
+                orphan[orphan_count] = old_original[key]
+            }
+        }
+
+
+        # --------------------------------------------------------
+        # Process the new template.
+        # --------------------------------------------------------
+
+        for (i = 1; i <= new_count; i++) {
+
+            line = new_lines[i]
+            key = get_include(line)
+
+            if (key != "" && key in old_exists) {
+
+                # Remove existing comment prefix.
+                content = line
+                sub(/^[[:space:]]*#[[:space:]]*/, "", content)
+
+                if (key in old_active) {
+
+                    # User had this include enabled.
+                    line = content
+
+                } else {
+
+                    # User had this include disabled.
+                    line = "# " content
+                }
+            }
+
+            print line
+
+
+            # Insert old custom includes after their closest
+            # surviving anchor.
+            if (i in insert_count) {
+
+                for (
+                    j = 1;
+                    j <= insert_count[i];
+                    j++
+                ) {
+                    print insert_after[i, j]
+                }
+            }
+        }
+
+
+        # --------------------------------------------------------
+        # Includes with no surviving anchor.
+        #
+        # These are rare, but never silently discard user config.
+        # --------------------------------------------------------
+
+        if (orphan_count > 0) {
+
+            print ""
+            print "# ------------------------------------------------"
+            print "# Preserved custom includes from previous config"
+            print "# ------------------------------------------------"
+
+            for (i = 1; i <= orphan_count; i++)
+                print orphan[i]
+        }
+    }
+
+    ' "$old_config" "$new_template" > "$tmp_file"; then
+
+        echo "[ERROR] Failed to generate updated printer.cfg."
+        rm -f "$tmp_file"
+        return 1
+    fi
+
+
+    # ------------------------------------------------------------
+    # Validation
+    # ------------------------------------------------------------
+
+    if [[ ! -s "$tmp_file" ]]; then
+        echo "[ERROR] Generated printer.cfg is empty."
+        rm -f "$tmp_file"
+        return 1
+    fi
+
+    if ! grep -qE \
+        '^[[:space:]]*#?[[:space:]]*\[include[[:space:]]+' \
+        "$tmp_file"; then
+
+        echo "[ERROR] Generated printer.cfg contains no includes."
+        rm -f "$tmp_file"
+        return 1
+    fi
+
+
+    # Preserve permissions if possible.
+    if [[ -f "$output_config" ]]; then
+        chmod --reference="$output_config" "$tmp_file" 2>/dev/null || true
+        chown --reference="$output_config" "$tmp_file" 2>/dev/null || true
+    fi
+
+
+    # ------------------------------------------------------------
+    # Atomic replacement
+    # ------------------------------------------------------------
+
+    if ! mv -f "$tmp_file" "$output_config"; then
+        echo "[ERROR] Unable to install updated printer.cfg."
+        rm -f "$tmp_file"
+        return 1
+    fi
+
+    echo "[CONFIG-UPDATE] printer.cfg successfully migrated."
+}
+
+
+# ================================================================
+# VARIABLES.CFG MIGRATION
+#
+# Uses Python because variables.cfg contains Python-style multiline
+# dictionaries. Parsing these safely in awk would be unnecessarily
+# fragile.
+# ================================================================
+
+function migrate_variables_config {
+    local old_config="$1"
+    local new_template="$2"
+    local output_config="$3"
+
+    local config_dir
+    local config_name
+    local tmp_file
+
+    config_dir="$(dirname "$output_config")"
+    config_name="$(basename "$output_config")"
+
+    mkdir -p "$config_dir"
+
+    tmp_file="$(mktemp \
+        "${config_dir}/.${config_name}.update.XXXXXX")" || {
+        echo "[ERROR] Unable to create variables.cfg temporary file."
+        return 1
+    }
+
+    echo "[CONFIG-UPDATE] Updating variables.cfg..."
+
+    if ! python3 - \
+        "$old_config" \
+        "$new_template" \
+        "$tmp_file" <<'PYTHON'
+import re
+import sys
+from pathlib import Path
+
+old_path = Path(sys.argv[1])
+template_path = Path(sys.argv[2])
+output_path = Path(sys.argv[3])
+
+VARIABLE_RE = re.compile(
+    r'^(\s*)(variable_[A-Za-z0-9_]+)\s*:\s*(.*)$'
+)
+
+NEW_DEFAULT_RE = re.compile(
+    r'\s+#new default=.*$',
+    re.IGNORECASE
+)
+
+MULTILINE_NOTICE = (
+    "# NEW DEFAULT AVAILABLE - "
+    "see current Klippain variables.cfg"
+)
+
+def strip_new_default(value):
+    """Remove an annotation previously created by this updater."""
+    return NEW_DEFAULT_RE.sub("", value).rstrip()
+
+def brace_delta(text):
+    """
+    Count {}, [] and () while ignoring quoted strings.
+
+    Klippain multiline variable values are Python-like structures.
+    This is sufficient to identify where the current dictionary,
+    list, or tuple ends.
+    """
+
+    delta = 0
+    quote = None
+    escaped = False
+
+    pairs = {
+        "{": 1,
+        "[": 1,
+        "(": 1,
+        "}": -1,
+        "]": -1,
+        ")": -1,
+    }
+
+    for char in text:
+        if escaped:
+            escaped = False
+            continue
+        if char == "\\" and quote:
+            escaped = True
+            continue
+        if quote:
+            if char == quote:
+                quote = None
+            continue
+        if char in ("'", '"'):
+            quote = char
+            continue
+        delta += pairs.get(char, 0)
+    return delta
+
+def parse_variables(lines):
+    """
+    Return information about every variable.
+
+    Each entry contains:
+      start      first line number
+      end        last line number
+      lines      complete variable value/block
+      multiline whether the value spans multiple lines
+    """
+
+    variables = {}
+    i = 0
+
+    while i < len(lines):
+        match = VARIABLE_RE.match(lines[i])
+        if not match:
+            i += 1
+            continue
+        name = match.group(2)
+        first_value = strip_new_default(match.group(3))
+        start = i
+        end = i
+        depth = brace_delta(first_value)
+
+        # A positive brace depth indicates a multiline Python-style
+        # dictionary/list/tuple.
+        while depth > 0 and end + 1 < len(lines):
+            end += 1
+            depth += brace_delta(lines[end])
+        block = lines[start:end + 1]
+
+        # Remove our own old multiline warning if somehow captured.
+        while (
+            start > 0
+            and lines[start - 1].strip() == MULTILINE_NOTICE
+        ):
+            start -= 1
+        variables[name] = {
+            "start": start,
+            "value_start": i,
+            "end": end,
+            "lines": block,
+            "multiline": end > i,
+        }
+        i = end + 1
+    return variables
+
+def normalized_value(entry):
+    """
+    Normalize a variable value for comparison while preserving the
+    actual original text for output.
+    """
+    lines = entry["lines"]
+    if not lines:
+        return ""
+    match = VARIABLE_RE.match(lines[0])
+    if not match:
+        return ""
+    first = strip_new_default(match.group(3))
+    if not entry["multiline"]:
+        return first.strip()
+    values = [first.rstrip()]
+    for line in lines[1:]:
+        values.append(line.rstrip())
+    return "\n".join(values).strip()
+
+def make_single_line(old_entry, new_entry):
+    """
+    Preserve the old value while using the variable spelling/
+    formatting from the new template.
+    """
+
+    old_match = VARIABLE_RE.match(old_entry["lines"][0])
+    new_match = VARIABLE_RE.match(new_entry["lines"][0])
+
+    old_value = strip_new_default(old_match.group(3))
+    new_value = strip_new_default(new_match.group(3))
+
+    # Preserve inline comments that belong to the user's value.
+    #
+    # The entire old RHS is retained. The new default annotation is
+    # simply appended.
+    if old_value.strip() == new_value.strip():
+        return [old_entry["lines"][0].rstrip()]
+    return [
+        f"{old_entry['lines'][0].rstrip()} "
+        f"#new default={new_value.strip()}"
+    ]
+
+def make_multiline(old_entry, new_entry):
+    """
+    Preserve the complete old multiline block.
+    If the new template differs, place a warning immediately above
+    the variable.
+    """
+    old_value = normalized_value(old_entry)
+    new_value = normalized_value(new_entry)
+    block = list(old_entry["lines"])
+    if old_value == new_value:
+        return block
+    return [MULTILINE_NOTICE] + block
+
+old_lines = old_path.read_text(
+    encoding="utf-8"
+).splitlines()
+template_lines = template_path.read_text(
+    encoding="utf-8"
+).splitlines()
+
+old_vars = parse_variables(old_lines)
+new_vars = parse_variables(template_lines)
+
+# ----------------------------------------------------------------
+# Statistics
+# ----------------------------------------------------------------
+preserved = 0
+new_count = 0
+changed_defaults = 0
+multiline_changed = 0
+custom_count = 0
+
+# ----------------------------------------------------------------
+# Build output from the NEW template.
+#
+# This preserves new comments, organization and documentation.
+# ----------------------------------------------------------------
+output = []
+i = 0
+while i < len(template_lines):
+    line = template_lines[i]
+    match = VARIABLE_RE.match(line)
+    if not match:
+        output.append(line)
+        i += 1
+        continue
+    name = match.group(2)
+    new_entry = new_vars[name]
+
+    # Variable exists only in new template.
+    if name not in old_vars:
+        output.extend(new_entry["lines"])
+        new_count += 1
+        i = new_entry["end"] + 1
+        continue
+
+    old_entry = old_vars[name]
+    old_value = normalized_value(old_entry)
+    new_value = normalized_value(new_entry)
+    preserved += 1
+    if old_value != new_value:
+        changed_defaults += 1
+
+    # Multiline on either side: preserve complete old block.
+    if old_entry["multiline"] or new_entry["multiline"]:
+        block = make_multiline(old_entry, new_entry)
+        if old_value != new_value:
+            multiline_changed += 1
+        output.extend(block)
+    else:
+        output.extend(
+            make_single_line(old_entry, new_entry)
+        )
+
+    i = new_entry["end"] + 1
+
+# ----------------------------------------------------------------
+# Preserve variables that no longer exist in the new template.
+#
+# These may be user-created variables or variables removed upstream.
+# Never silently delete them.
+# ----------------------------------------------------------------
+custom_variables = [
+    name
+    for name in old_vars
+    if name not in new_vars
+]
+if custom_variables:
+    output.extend([
+        "",
+        "# ------------------------------------------------",
+        "# Preserved variables from previous configuration",
+        "# ------------------------------------------------",
+    ])
+    # Preserve original order.
+    custom_variables.sort(
+        key=lambda name: old_vars[name]["value_start"]
+    )
+    for name in custom_variables:
+        entry = old_vars[name]
+        output.extend(entry["lines"])
+        custom_count += 1
+
+output_path.write_text(
+    "\n".join(output) + "\n",
+    encoding="utf-8"
+)
+
+# Machine-readable statistics returned to the shell through stderr
+# would complicate installer output, so print the report here.
+print(
+    f"[CONFIG-UPDATE]   {preserved} existing variables preserved"
+)
+print(
+    f"[CONFIG-UPDATE]   {new_count} new variables added"
+)
+print(
+    f"[CONFIG-UPDATE]   {changed_defaults} variables have "
+    f"new defaults"
+)
+if multiline_changed:
+    print(
+        f"[CONFIG-UPDATE]   {multiline_changed} multiline "
+        f"variables have new defaults"
+    )
+if custom_count:
+    print(
+        f"[CONFIG-UPDATE]   {custom_count} custom/deprecated "
+        f"variables preserved"
+    )
+PYTHON
+    then
+        echo "[ERROR] Failed to generate updated variables.cfg."
+        rm -f "$tmp_file"
+        return 1
+    fi
+
+    # ------------------------------------------------------------
+    # Validation
+    # ------------------------------------------------------------
+    if [[ ! -s "$tmp_file" ]]; then
+        echo "[ERROR] Generated variables.cfg is empty."
+        rm -f "$tmp_file"
+        return 1
+    fi
+    if ! grep -qE \
+        '^[[:space:]]*variable_[A-Za-z0-9_]+[[:space:]]*:' \
+        "$tmp_file"; then
+
+        echo "[ERROR] Generated variables.cfg contains no variables."
+        rm -f "$tmp_file"
+        return 1
+    fi
+    if ! grep -qF '[gcode_macro _USER_VARIABLES]' "$tmp_file"; then
+        echo "[ERROR] Generated variables.cfg is missing _USER_VARIABLES."
+        rm -f "$tmp_file"
+        return 1
+    fi
+
+    # Preserve permissions.
+    if [[ -f "$output_config" ]]; then
+        chmod --reference="$output_config" "$tmp_file" 2>/dev/null || true
+        chown --reference="$output_config" "$tmp_file" 2>/dev/null || true
+    fi
+
+    # ------------------------------------------------------------
+    # Atomic replacement
+    # ------------------------------------------------------------
+    if ! mv -f "$tmp_file" "$output_config"; then
+        echo "[ERROR] Unable to install updated variables.cfg."
+        rm -f "$tmp_file"
+        return 1
+    fi
+
+    echo "[CONFIG-UPDATE] variables.cfg successfully migrated."
+
+    if grep -q '#new default=' "$output_config" ||
+       grep -qF "$(
+           printf '%s' \
+           '# NEW DEFAULT AVAILABLE - see current Klippain variables.cfg'
+       )" "$output_config"; then
+
+        echo "[CONFIG-UPDATE] NOTICE: New defaults are available."
+        echo "[CONFIG-UPDATE] Your existing values were NOT changed."
+        echo "[CONFIG-UPDATE] Review variables.cfg for details."
+    fi
+}
 
 # Step 4: Put the new configuration files in place to be ready to start
 function install_config {
-    echo "[INSTALL] Installation of the last Klippain config files"
-    mkdir -p ${USER_CONFIG_PATH}
+    echo "[INSTALL] Installation of the latest Klippain config files"
+    mkdir -p "${USER_CONFIG_PATH}"
 
-    # Symlink Frix-x config folders (read-only git repository) to the user's config directory
+    # Symlink Klippain config folders (read-only git repository)
+    # to the user's config directory.
     for dir in config macros scripts moonraker; do
-        ln -fsn ${FRIX_CONFIG_PATH}/$dir ${USER_CONFIG_PATH}/$dir
+        ln -fsn \
+            "${FRIX_CONFIG_PATH}/${dir}" \
+            "${USER_CONFIG_PATH}/${dir}"
     done
 
-    # Detect if it's a first install by looking at the .VERSION file to ask for the config
-    # template install. If the config is already installed, nothing need to be done here
-    # as moonraker is already pulling the changes and custom user config files are already here
+    # ============================================================
+    # NEW INSTALLATION
+    # ============================================================
+
     if [ ! -f "${BACKUP_DIR}/.VERSION" ]; then
         printf "[INSTALL] New installation detected: config templates will be set in place!\n\n"
-        find ${FRIX_CONFIG_PATH}/user_templates/ -type d -name 'mcu_defaults' -prune -o -type f -print | xargs cp -ft ${USER_CONFIG_PATH}/
-        for config_file in crowsnest.conf sonar.conf timelapse.cfg; do
+        find "${FRIX_CONFIG_PATH}/user_templates/" \
+            -type d -name 'mcu_defaults' -prune \
+            -o -type f -print |
+            xargs cp -ft "${USER_CONFIG_PATH}/"
+
+        # Restore external service configuration files if they
+        # existed before Klippain was installed.
+        #
+        # This behavior exists in the current upstream installer.
+        for config_file in \
+            crowsnest.conf \
+            sonar.conf \
+            timelapse.cfg
+        do
             if [ -f "${BACKUP_DIR}/${config_file}" ]; then
-                cp -f "${BACKUP_DIR}/${config_file}" "${USER_CONFIG_PATH}/${config_file}"
-                printf "[INSTALL] Existing ${config_file} restored from backup\n\n"
+                cp -f \
+                    "${BACKUP_DIR}/${config_file}" \
+                    "${USER_CONFIG_PATH}/${config_file}"
+                printf \
+                    "[INSTALL] Existing %s restored from backup\n\n" \
+                    "${config_file}"
             fi
         done
         install_mcu_templates
+
+    # ============================================================
+    # EXISTING INSTALLATION
+    # ============================================================
+    else
+        printf "[INSTALL] Existing Klippain installation detected.\n"
+        printf "[INSTALL] Updating user configuration templates...\n\n"
+        update_user_templates
     fi
 
-    # CHMOD the scripts to be sure they are all executables (Git should keep the modes on files but it's to be sure)
-    chmod +x ${FRIX_CONFIG_PATH}/install.sh
-    chmod +x ${FRIX_CONFIG_PATH}/uninstall.sh
+    # CHMOD scripts.
+    chmod +x "${FRIX_CONFIG_PATH}/install.sh"
+    chmod +x "${FRIX_CONFIG_PATH}/uninstall.sh"
 
-    # Symlink the gcode_shell_command.py file in the correct Klipper folder (erased to always get the last version)
-    ln -fsn ${FRIX_CONFIG_PATH}/scripts/gcode_shell_command.py ${KLIPPER_PATH}/klippy/extras
+    # Symlink gcode_shell_command.py.
+    ln -fsn \
+        "${FRIX_CONFIG_PATH}/scripts/gcode_shell_command.py" \
+        "${KLIPPER_PATH}/klippy/extras"
 
-    # Create or update the config version tracking file in the user config directory
-    git -C ${FRIX_CONFIG_PATH} rev-parse HEAD > ${USER_CONFIG_PATH}/.VERSION
+    # Record the repository version associated with this config.
+    git -C "${FRIX_CONFIG_PATH}" rev-parse HEAD \
+        > "${USER_CONFIG_PATH}/.VERSION"
 }
 
 
