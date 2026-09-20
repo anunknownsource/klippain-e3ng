@@ -100,27 +100,42 @@ function backup_config {
         return 0
     fi
 
-    mkdir -p ${BACKUP_DIR}
+    mkdir -p "${BACKUP_DIR}"
 
-    # Copy every files from the user config ("2>/dev/null || :" allow it to fail silentely in case the config dir doesn't exist)
-    cp -fa ${USER_CONFIG_PATH}/. ${BACKUP_DIR} 2>/dev/null || :
-    # Then delete Klippain-managed symlinks while preserving external config symlinks like mainsail.cfg
+    cp -fa \
+        "${USER_CONFIG_PATH}/." \
+        "${BACKUP_DIR}" \
+        2>/dev/null || :
+
+    # Delete only Klippain-managed symlinks from the backup.
+    # Preserve external config symlinks such as mainsail.cfg.
     while IFS= read -r -d '' link; do
-        link_target="$(readlink -f "${link}" 2>/dev/null || true)"
+
+        link_target="$(
+            readlink -f "${link}" 2>/dev/null || true
+        )"
+
         case "${link_target}" in
+
             "${FRIX_CONFIG_PATH}"|"${FRIX_CONFIG_PATH}"/*)
                 rm -f "${link}"
                 ;;
-        esac
-    done < <(find "${BACKUP_DIR}" -type l -print0)
 
-    # If Klippain is not already installed (we check for .VERSION in the backup to detect it),
-    # we need to remove, wipe and clean the current user config folder...
+        esac
+
+    done < <(
+        find "${BACKUP_DIR}" -type l -print0
+    )
+
+    # If Klippain wasn't already installed, clean the user's
+    # configuration directory before performing a new installation.
     if [ ! -f "${BACKUP_DIR}/.VERSION" ]; then
-        rm -fR ${USER_CONFIG_PATH}
+        rm -fR "${USER_CONFIG_PATH}"
     fi
 
-    printf "[BACKUP] Backup of current user config files done in: ${BACKUP_DIR}\n\n"
+    printf \
+        "[BACKUP] Backup of current user config files done in: %s\n\n" \
+        "${BACKUP_DIR}"
 }
 
 # ================================================================
