@@ -3,7 +3,7 @@
 ###### AUTOMATED INSTALL AND UPDATE SCRIPT ######
 #################################################
 # Written by yomgui1 & Frix_x
-# @version: 1.3
+# @version: 1.5
 
 # CHANGELOG:
 #   v1.5: Added configuration migration
