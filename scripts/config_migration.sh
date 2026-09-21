@@ -175,7 +175,7 @@ function migrate_printer_config {
     mkdir -p "$config_dir"
 
     tmp_file="$(
-        mktemp "${config_dir}/.${config_name}.update.XXXXXX"
+        mktemp "${TMPDIR:-/tmp}/klippain-${config_name}.candidate.XXXXXX"
     )" || {
         echo "[ERROR] Unable to create printer.cfg temporary file."
         return 1
@@ -504,16 +504,46 @@ function migrate_printer_config {
     fi
 
 
-    # Atomic replacement.
-    if ! mv -f "$tmp_file" "$output_config"; then
+    # ============================================================
+    # INSTALL ONLY WHEN CONTENT CHANGED
+    # ============================================================
 
-        echo "[ERROR] Unable to install updated printer.cfg."
-
+    if [[ -f "$output_config" ]] && cmp -s "$tmp_file" "$output_config"; then
         rm -f "$tmp_file"
+        echo "[CONFIG-UPDATE] printer.cfg already up to date."
+        return 0
+    fi
 
+    # Stage the validated candidate on the destination filesystem so
+    # the final rename remains atomic without exposing the generation
+    # process to Moonraker's watched config directory.
+    local staged_file
+    staged_file="$(mktemp "${config_dir}/.${config_name}.update.XXXXXX")" || {
+        echo "[ERROR] Unable to create printer.cfg staging file."
+        rm -f "$tmp_file"
+        return 1
+    }
+
+    if ! cp -f "$tmp_file" "$staged_file"; then
+        echo "[ERROR] Unable to stage updated printer.cfg."
+        rm -f "$tmp_file" "$staged_file"
         return 1
     fi
 
+    rm -f "$tmp_file"
+
+    # Preserve permissions/ownership on the staged file.
+    if [[ -f "$output_config" ]]; then
+        chmod --reference="$output_config" "$staged_file" 2>/dev/null || true
+        chown --reference="$output_config" "$staged_file" 2>/dev/null || true
+    fi
+
+    # Atomic replacement.
+    if ! mv -f "$staged_file" "$output_config"; then
+        echo "[ERROR] Unable to install updated printer.cfg."
+        rm -f "$staged_file"
+        return 1
+    fi
 
     echo "[CONFIG-UPDATE] printer.cfg successfully migrated."
 }
@@ -539,7 +569,7 @@ function migrate_variables_config {
     mkdir -p "$config_dir"
 
     tmp_file="$(
-        mktemp "${config_dir}/.${config_name}.update.XXXXXX"
+        mktemp "${TMPDIR:-/tmp}/klippain-${config_name}.candidate.XXXXXX"
     )" || {
         echo "[ERROR] Unable to create variables.cfg temporary file."
         return 1
@@ -1426,20 +1456,46 @@ PYTHON
 
 
     # ============================================================
-    # ATOMIC REPLACEMENT
+    # INSTALL ONLY WHEN CONTENT CHANGED
     # ============================================================
 
-    if ! mv -f "$tmp_file" "$output_config"; then
+    local variables_changed=1
 
-        echo "[ERROR] Unable to install updated variables.cfg."
+    if [[ -f "$output_config" ]] && cmp -s "$tmp_file" "$output_config"; then
+        variables_changed=0
+        rm -f "$tmp_file"
+        echo "[CONFIG-UPDATE] variables.cfg already up to date."
+    else
+        # Stage the validated candidate on the destination filesystem so
+        # the final rename remains atomic.
+        local staged_file
+        staged_file="$(mktemp "${config_dir}/.${config_name}.update.XXXXXX")" || {
+            echo "[ERROR] Unable to create variables.cfg staging file."
+            rm -f "$tmp_file"
+            return 1
+        }
+
+        if ! cp -f "$tmp_file" "$staged_file"; then
+            echo "[ERROR] Unable to stage updated variables.cfg."
+            rm -f "$tmp_file" "$staged_file"
+            return 1
+        fi
 
         rm -f "$tmp_file"
 
-        return 1
+        if [[ -f "$output_config" ]]; then
+            chmod --reference="$output_config" "$staged_file" 2>/dev/null || true
+            chown --reference="$output_config" "$staged_file" 2>/dev/null || true
+        fi
+
+        if ! mv -f "$staged_file" "$output_config"; then
+            echo "[ERROR] Unable to install updated variables.cfg."
+            rm -f "$staged_file"
+            return 1
+        fi
+
+        echo "[CONFIG-UPDATE] variables.cfg successfully migrated."
     fi
-
-
-    echo "[CONFIG-UPDATE] variables.cfg successfully migrated."
 
 
     # ============================================================
@@ -1903,6 +1959,51 @@ TEST_EOF
         test_pass "16. Missing-history safe fallback"
     else
         test_fail "16. Missing-history safe fallback"
+    fi
+
+    # Test 17: unchanged printer.cfg must not be replaced.
+    cat > "$old_printer" <<'TEST_EOF'
+[include config/kinematics/cartesian.cfg]
+# [include config/kinematics/corexy.cfg]
+[include config/hardware/fans/controller_fan.cfg]
+# [include config/hardware/fans/rpi_fan.cfg]
+[include variables.cfg]
+[include mcu.cfg]
+[include overrides.cfg]
+TEST_EOF
+    # First migration establishes the canonical migrated output.
+    migrate_printer_config "$old_printer" "$new_printer" "$output_printer" >/dev/null 2>&1
+    printer_inode_before="$(stat -c %i "$output_printer")"
+    printer_mtime_before="$(stat -c %y "$output_printer")"
+
+    # A second migration using the already-migrated file as the source
+    # must leave the live file itself untouched.
+    if migrate_printer_config "$output_printer" "$new_printer" "$output_printer" >/dev/null 2>&1 &&
+       [[ "$(stat -c %i "$output_printer")" == "$printer_inode_before" ]] &&
+       [[ "$(stat -c %y "$output_printer")" == "$printer_mtime_before" ]]; then
+        test_pass "17. Unchanged printer.cfg not replaced"
+    else
+        test_fail "17. Unchanged printer.cfg not replaced" "Inode or modification time changed."
+    fi
+
+    # Test 18: unchanged variables.cfg must not be replaced.
+    cat > "$old_variables" <<'TEST_EOF'
+[gcode_macro _USER_VARIABLES]
+variable_travel_speed: 350
+gcode:
+    {% set dummy = 1 %}
+TEST_EOF
+    cp "$old_variables" "$new_variables"
+    cp "$old_variables" "$output_variables"
+    variables_inode_before="$(stat -c %i "$output_variables")"
+    variables_mtime_before="$(stat -c %y "$output_variables")"
+
+    if migrate_variables_config "$old_variables" "$new_variables" "$output_variables" "" >/dev/null 2>&1 &&
+       [[ "$(stat -c %i "$output_variables")" == "$variables_inode_before" ]] &&
+       [[ "$(stat -c %y "$output_variables")" == "$variables_mtime_before" ]]; then
+        test_pass "18. Unchanged variables.cfg not replaced"
+    else
+        test_fail "18. Unchanged variables.cfg not replaced" "Inode or modification time changed."
     fi
 
     echo
