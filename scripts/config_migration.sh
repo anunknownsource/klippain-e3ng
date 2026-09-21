@@ -95,7 +95,7 @@ function update_user_templates {
                "${previous_version}^{commit}" 2>/dev/null; then
 
             old_variables_template="$(
-                mktemp "${USER_CONFIG_PATH}/.variables.old.XXXXXX"
+                mktemp "${TMPDIR:-/tmp}/klippain-variables.old.XXXXXX"
             )"
 
             if ! git -C "${FRIX_CONFIG_PATH}" show \

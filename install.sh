@@ -3,7 +3,7 @@
 ###### AUTOMATED INSTALL AND UPDATE SCRIPT ######
 #################################################
 # Written by yomgui1 & Frix_x
-# @version: 1.5
+# @version: 1.3
 
 # CHANGELOG:
 #   v1.5: Added configuration migration
@@ -87,7 +87,30 @@ function check_download {
             exit -1
         fi
     else
-        printf "[DOWNLOAD] Klippain repository already found locally. Continuing...\n\n"
+        printf "[DOWNLOAD] Klippain repository already found locally. Updating branch %s...\n" "${frixbranchname}"
+
+        # The installer is often executed directly from GitHub while the
+        # persistent Klippain checkout already exists. Refresh that checkout
+        # before sourcing scripts from it, otherwise install.sh can be newer
+        # than scripts/config_migration.sh.
+        if ! git -C "${FRIX_CONFIG_PATH}" fetch origin "${frixbranchname}"; then
+            echo "[ERROR] Unable to fetch Klippain branch ${frixbranchname}."
+            exit -1
+        fi
+
+        if ! git -C "${FRIX_CONFIG_PATH}" checkout -q "${frixbranchname}" 2>/dev/null; then
+            if ! git -C "${FRIX_CONFIG_PATH}" checkout -q -b "${frixbranchname}" "origin/${frixbranchname}"; then
+                echo "[ERROR] Unable to check out Klippain branch ${frixbranchname}."
+                exit -1
+            fi
+        fi
+
+        if ! git -C "${FRIX_CONFIG_PATH}" reset --hard "origin/${frixbranchname}" >/dev/null; then
+            echo "[ERROR] Unable to update Klippain branch ${frixbranchname}."
+            exit -1
+        fi
+
+        printf "[DOWNLOAD] Klippain repository updated to origin/%s.\n\n" "${frixbranchname}"
     fi
 }
 
