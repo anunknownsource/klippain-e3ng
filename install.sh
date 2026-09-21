@@ -3,10 +3,10 @@
 ###### AUTOMATED INSTALL AND UPDATE SCRIPT ######
 #################################################
 # Written by yomgui1 & Frix_x
-# @version: 1.5
+# @version: 1.3
 
 # CHANGELOG:
-#   v1.5: Added standalone configuration migration
+#   v1.5: Added configuration migration
 #   v1.4: added Shake&Tune install call
 #   v1.3: - added a warning on first install to be sure the user wants to install klippain and fixed a bug
 #           where some artefacts of the old user config where still present after the install (harmless bug but not clean)
@@ -138,6 +138,16 @@ function backup_config {
         "[BACKUP] Backup of current user config files done in: %s\n\n" \
         "${BACKUP_DIR}"
 }
+
+# ================================================================
+# USER CONFIG MIGRATION
+# ================================================================
+# Migration implementation lives in:
+#   scripts/config_migration.sh
+#
+# It is loaded only when required for an existing installation.
+# ================================================================
+
 
 # Step 4: Put the new configuration files in place to be ready to start
 function install_config {
@@ -398,26 +408,55 @@ function restart_klipper {
 
 if [[ "${1:-}" == "--test-migration" ]]; then
     migration_test_script=""
+    script_dir=""
+    downloaded_migration_script=""
 
     # Prefer the migration module beside this installer when running
-    # from a checked-out repository. Fall back to the configured
-    # Klippain repository path.
-    script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd || true)"
+    # from a checked-out repository. BASH_SOURCE can be unset when
+    # install.sh is piped directly to bash, so guard it under set -u.
+    if [[ -n "${BASH_SOURCE[0]:-}" ]]; then
+        script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd || true)"
 
-    if [[ -n "${script_dir}" && -f "${script_dir}/scripts/config_migration.sh" ]]; then
-        migration_test_script="${script_dir}/scripts/config_migration.sh"
-    elif [[ -f "${FRIX_CONFIG_PATH}/scripts/config_migration.sh" ]]; then
+        if [[ -n "${script_dir}" && -f "${script_dir}/scripts/config_migration.sh" ]]; then
+            migration_test_script="${script_dir}/scripts/config_migration.sh"
+        fi
+    fi
+
+    # If the installer is being piped from GitHub, there is no local
+    # companion file. Download the migration module from the same
+    # repository/branch used for this feature.
+    if [[ -z "${migration_test_script}" ]]; then
+        downloaded_migration_script="$(mktemp "${TMPDIR:-/tmp}/klippain-config-migration.XXXXXX")"
+
+        if wget -qO "${downloaded_migration_script}" \
+            "https://raw.githubusercontent.com/anunknownsource/klippain-e3ng/config_migration/scripts/config_migration.sh"; then
+            migration_test_script="${downloaded_migration_script}"
+        else
+            rm -f "${downloaded_migration_script}"
+            downloaded_migration_script=""
+        fi
+    fi
+
+    # Final fallback for a locally installed Klippain checkout.
+    if [[ -z "${migration_test_script}" && -f "${FRIX_CONFIG_PATH}/scripts/config_migration.sh" ]]; then
         migration_test_script="${FRIX_CONFIG_PATH}/scripts/config_migration.sh"
     fi
 
     if [[ -z "${migration_test_script}" ]]; then
-        echo "[ERROR] Unable to locate scripts/config_migration.sh."
-        echo "[ERROR] Run this command from a checked-out Klippain repository"
-        echo "[ERROR] or ensure ${FRIX_CONFIG_PATH} contains the migration module."
+        echo "[ERROR] Unable to locate or download scripts/config_migration.sh."
         exit 1
     fi
 
-    exec bash "${migration_test_script}" --test-migration
+    # Do not use exec here when the module was downloaded to a temporary
+    # file; the parent shell needs to remove it after the tests finish.
+    bash "${migration_test_script}" --test-migration
+    test_status=$?
+
+    if [[ -n "${downloaded_migration_script}" ]]; then
+        rm -f "${downloaded_migration_script}"
+    fi
+
+    exit "${test_status}"
 fi
 
 if [[ $# -gt 0 ]]; then
